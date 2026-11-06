@@ -885,7 +885,7 @@ std::shared_ptr<MenuPage> App::pageMain() {
     };
     pg.items.push_back(ac);
     MenuItem online = MenuItem::submenu("Online Play", [this]() { menu.push(pageOnline()); },
-                                        "Play co-op over the internet: host a game, or join one as player 2.");
+                                        "Play co-op over the internet with up to 5 players: host a game, or join one.");
     online.valueText = [this]() { return net.active() ? netSummary() : std::string(); };
     pg.items.push_back(online);
     pg.items.push_back(MenuItem::submenu("Sound Select", [this]() { menu.push(pageSoundSelect()); },
@@ -1045,16 +1045,18 @@ std::shared_ptr<MenuPage> App::pageOptions() {
         "Off: he keeps rising, as in the original All-Stars. (BMF54123's brick fix.)"));
     pg.items.push_back(MenuItem::header("Multiplayer"));
     pg.items.push_back(MenuItem::toggle(
-        "Two-Player Co-op", [this]() { return cfg.coop ? 1 : 0; },
+        "Co-op", [this]() { return cfg.coop ? 1 : 0; },
         [this](int v) {
           cfg.coop = v != 0;
           applyConfig();
         },
         "Mario and Luigi play at once, Luigi on controller 2, in Super Mario Bros., The Lost Levels and Super "
-        "Mario Bros. 3 (the screen follows both; a player left idle a few seconds is brought along). "
-        "Each of those games' title screens also has CO-OP GAME, which sets this."));
+        "Mario Bros. 3 (the screen follows both; a player left behind a few seconds is brought along). In Super "
+        "Mario Bros. and The Lost Levels players 3 to 5 join in with Start on their controllers (held 2 seconds: "
+        "they leave), and Select changes a player's colours. Each of those games' title screens also has CO-OP "
+        "GAME, which sets this."));
     MenuItem online = MenuItem::submenu("Online Play", [this]() { menu.push(pageOnline()); },
-                                        "Play over the internet: host a game, or join one as player 2.");
+                                        "Play over the internet with up to 5 players: host a game, or join one.");
     online.valueText = [this]() { return net.active() ? netSummary() : std::string(); };
     pg.items.push_back(online);
     pg.items.push_back(MenuItem::header("Speed"));
@@ -1786,7 +1788,8 @@ std::shared_ptr<MenuPage> App::pageLevelSelect() {
     if (coopGame)
       pg.items.push_back(MenuItem::choice("Players", {"1 Player", "Co-op"}, [selCoop]() { return *selCoop; },
                                           [selCoop](int v) { *selCoop = v; },
-                                          "One player, or Mario and Luigi at once (Luigi on controller 2), as the "
+                                          "One player, or Mario and Luigi at once (Luigi on controller 2; in Super "
+                                          "Mario Bros. and The Lost Levels players 3 to 5 join with Start), as the "
                                           "title screen's CO-OP GAME."));
     const int gi = *selGame;
     const bool smb2 = d.game == GameId::SMB2;

@@ -16,14 +16,27 @@ and **P2** Luigi, the console's two controllers, so co-op, the original 2 PLAYER
 Bros. 3's battle game all work. Only the controllers travel over the network: every computer runs the same
 game.
 
-> **Work in progress:** players **P3 to P5** can already join, and their controllers reach the game on every
-> computer, but they don't have a character on screen yet. That comes next, game by game (Super Mario Bros.
-> and The Lost Levels first, then Super Mario Bros. 3, then Super Mario Bros. 2), with drop-in by pressing
-> Start and a colour of your choice.
+**Super Mario Bros. and The Lost Levels** have all five on screen at once (see [Five-player co-op](#five-player-co-op)).
+In **Super Mario Bros. 3 and Super Mario Bros. 2**, players 3 to 5 don't have a character yet: they come next.
 
 Several people can play on one computer: set *Online Play → Players on This Computer* (each uses their own
 *Player 1*, *Player 2*... controls from *Options → Controls*; players 3 to 5 are on the 3rd to 5th gamepad by
 default).
+
+### Five-player co-op
+In Super Mario Bros. and The Lost Levels (start with *CO-OP GAME*, or turn on *Options → Multiplayer → Co-op*):
+
+- **P1 and P2** play from the start, as in two-player co-op.
+- **P3, P4 and P5 press Start** on their controllers to join in, beside the game's player. **Hold Start for
+  2 seconds** to leave (and press it again to come back). Online, a player whose computer leaves drops out.
+- **Select** changes your colours (Classic NES, Fire, Ice, Shadow, Gold, Forest, Ocean, original). P3 starts
+  in Fire's white and red, P4 in Ice's light blue, P5 in Gold. P1, P3 and P5 are Mario, P2 and P4 Luigi
+  (in The Lost Levels with Luigi's higher jump).
+- **Lives are shared**: 5 for each player (a co-op game starts with at least 10; each one who joins adds 5,
+  once a game).
+- **The screen** follows whoever is in front. It **waits about 3 seconds** for someone held at its left edge,
+  then **brings them along** to where the one in front stands.
+- Anyone can take a pipe, a vine or the flag; the others come along.
 
 ### Before you start
 - Both players need **this build** (the same version: the official releases can't connect to it).
@@ -306,7 +319,7 @@ What each page holds:
   the level card (WORLD 1-1) shows both brothers' heads; in SMB3 the status bar (in levels and on the map) shows a combined M L badge, x and the shared lives,
   and the map's WORLD box shows both brothers. A co-op game
   starts (or continues) with at least 10 lives, as the brothers share them.
-* **Options → Multiplayer → Two-Player Co-op (SMB1, Lost Levels, SMB3)** — Mario and Luigi play
+* **Options → Multiplayer → Co-op (SMB1, Lost Levels, SMB3)** — Mario and Luigi play
   at the same time in Super Mario Bros. and The Lost Levels. Controller 1 has the character the
   game was started with (Mario, or Luigi in a Lost Levels Luigi game), controller 2 the other (by
   default the second controller, or I J K L, N jump, H run). The game's own player code runs a
@@ -330,6 +343,12 @@ What each page holds:
   When a player dies while the other plays on, his death tune plays and the area's music then
   carries on from where it paused (not from its start).
   Save states and rewind keep both players (see `src/game/smb1coop.cpp`).
+  **Up to five players** (this fork): players 3 to 5 drop in with Start on their controllers and
+  leave by holding it 2 seconds; each other player's turn runs the same way, one after another,
+  and each enemy, lift, spring, firebar, hammer and fireball meets each of them. Each has his own
+  colours (Select changes them; the PPU draws each one's sprites in his palette and animation
+  frame), the lives are 5 a player, and the screen waits 3 seconds for one held at its left edge,
+  then brings him along.
 * **Super Mario Bros. 3 co-op** (the same option; see `src/game/smb3coop.cpp`) —
   Luigi on controller 2, run through the game's own player code with his own variables: his own
   form and power-ups, stomps, hits, the star, flying, picking up the goal card. Each enemy or item
@@ -361,8 +380,9 @@ What each page holds:
   header aside) and music pack, checked as the client joins.
 * **Co-op speed** — the game's player code runs twice a frame in co-op, which slowed busy scenes
   down on the console's own clock, so with co-op on (SMB1, The Lost Levels, SMB3) the emulated
-  CPU runs at twice its speed (`Snes::setCpuFast`); the PPU, DMA and sound chip keep their timing.
-  One-player games keep the console's timing exactly.
+  CPU runs at twice its speed (`Snes::setCpuSpeed`), three times with three players and four times
+  with four or five; the PPU, DMA and sound chip keep their timing. One-player games keep the
+  console's timing exactly.
 
 ## Custom soundtracks (MSU-1)
 

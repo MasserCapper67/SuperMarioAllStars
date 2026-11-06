@@ -48,6 +48,7 @@ bool Snes::execCheck(uint32_t pc) {
 }
 
 void Snes::reset(bool hard) {
+  cpuCarry_ = 0;
   if (msu) msu->reset();
   if (hard) {
     std::memset(wram, 0x55, sizeof(wram));
@@ -248,7 +249,7 @@ int Snes::accessTime(uint32_t adr) const {
 }
 
 uint8_t Snes::cpuRead(uint32_t adr) {
-  tick(cpuFast_ ? accessTime(adr) >> 1 : accessTime(adr));  // (6, 8, 12: halved exactly; see setCpuFast)
+  cpuTick(accessTime(adr));  // (see setCpuSpeed)
   uint8_t v = busRead(adr);
   openBus_ = v;
   if (rwatchFn_) {
@@ -260,7 +261,7 @@ uint8_t Snes::cpuRead(uint32_t adr) {
 }
 
 void Snes::cpuWrite(uint32_t adr, uint8_t v) {
-  tick(cpuFast_ ? accessTime(adr) >> 1 : accessTime(adr));  // (6, 8, 12: halved exactly; see setCpuFast)
+  cpuTick(accessTime(adr));  // (see setCpuSpeed)
   openBus_ = v;
   if (watchFn_ || nWriteHooks_) {
     // Low WRAM mirrors are reported as $7Exxxx
@@ -766,6 +767,10 @@ std::vector<uint8_t> Snes::saveState() const {
   n = (uint32_t)x.size();
   w.v(n);
   w.raw(x.data(), x.size());
+  // (the faster CPU's cycles carried over, see setCpuSpeed: a tagged byte
+  // after the rest, which states without it (and older builds) do without)
+  const uint8_t carry[2] = {'K', (uint8_t)cpuCarry_};
+  w.raw(carry, 2);
   uint32_t crc = stateCrc(out.data(), out.size());
   w.v(crc);
   return out;
@@ -781,6 +786,7 @@ bool Snes::loadState(const std::vector<uint8_t>& data) {
 }
 
 bool Snes::loadStateRaw(const std::vector<uint8_t>& data) {
+  cpuCarry_ = 0;  // (see setCpuSpeed; kept in the state, else none)
   Reader r{data.data(), data.data() + data.size()};
   uint32_t magic = 0, ver = 0;
   r.v(magic);
@@ -840,6 +846,7 @@ bool Snes::loadStateRaw(const std::vector<uint8_t>& data) {
     ext = r.p;
     r.p += extSize;
   }
+  if (r.p + 2 <= r.end && r.p[0] == 'K' && r.p[1] < 4) cpuCarry_ = r.p[1];
   sanitizeState();
   if (stateExt) stateExt->loadExt(ext, extSize);
   frameDone_ = false;

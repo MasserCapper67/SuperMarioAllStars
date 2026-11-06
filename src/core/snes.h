@@ -27,12 +27,17 @@ public:
   // CPU bus interface
   uint8_t cpuRead(uint32_t adr);
   void cpuWrite(uint32_t adr, uint8_t val);
-  void cpuIdle() { tick(cpuFast_ ? 3 : 6); }
+  void cpuIdle() { cpuTick(6); }
   // The CPU at twice its speed (each of its cycles half as long; the PPU, DMA
   // and sound chip as ever): co-op runs the player's code twice a frame and
   // busy scenes ran past the frame (slowdown). Set before each frame.
-  void setCpuFast(bool fast) { cpuFast_ = fast; }
-  bool cpuFast() const { return cpuFast_; }
+  void setCpuFast(bool fast) { setCpuSpeed(fast ? 2 : 1); }
+  bool cpuFast() const { return cpuSpeed_ > 1; }
+  // ... or more times its speed (1-4): co-op with more players, each one's
+  // turn more of the player's code. (Cycles that don't divide evenly are
+  // carried over to the next access, and kept in save states.)
+  void setCpuSpeed(int speed) { cpuSpeed_ = speed < 1 ? 1 : speed > 4 ? 4 : speed; }
+  int cpuSpeed() const { return cpuSpeed_; }
 
   // Side-effect-free memory access for tools and game hooks
   uint8_t peek(uint32_t adr) const;
@@ -142,7 +147,15 @@ private:
   uint64_t cycles_ = 0;
   uint16_t hPos_ = 0, vPos_ = 0;
   uint16_t lineLen_ = 1364;
-  bool cpuFast_ = false;  // (see setCpuFast)
+  int cpuSpeed_ = 1, cpuCarry_ = 0;  // (see setCpuSpeed)
+  void cpuTick(int mc) {
+    if (cpuSpeed_ == 1) return tick(mc);
+    if (cpuSpeed_ == 2) return tick(mc >> 1);  // (6, 8, 12: halved exactly)
+    cpuCarry_ += mc;
+    const int n = cpuCarry_ / cpuSpeed_;
+    cpuCarry_ -= n * cpuSpeed_;
+    if (n) tick(n);
+  }
   uint32_t frames_ = 0;
   bool frameDone_ = false;
   bool pendingVblank_ = false;

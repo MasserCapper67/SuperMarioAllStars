@@ -192,8 +192,9 @@ computer's as it joins. P1 is Mario and P2 Luigi (the console's two
 controllers), so co-op, the 2 PLAYER GAMEs and SMB3's battle game all work.
 Every computer runs the same game: only the controllers travel.
 
-Work in progress: P3 to P5 can join and their controllers reach the game,
-but they have no character on screen yet (coming game by game).
+Super Mario Bros. and The Lost Levels have all five on screen at once
+(see FIVE-PLAYER CO-OP below). In SMB3 and SMB2, P3 to P5 have no character
+yet (coming next).
 
 Several can play on one computer: Online Play > Players on This Computer
 (each with their own Player 1, Player 2... controls in Options > Controls).
@@ -223,6 +224,16 @@ same music pack, or none).
     (Online Play > Input Delay sets it). Rewind and fast forward are off.
   - Every second the two games are compared; if they ever differ, the host's
     is sent again by itself.
+
+FIVE-PLAYER CO-OP (Super Mario Bros. and The Lost Levels, CO-OP GAME)
+
+  - P1 and P2 play from the start. P3, P4 and P5 press Start to join in;
+    holding Start for 2 seconds leaves (press it again to come back).
+  - Select changes your colours. P1, P3 and P5 are Mario, P2 and P4 Luigi.
+  - Lives are shared: 5 for each player.
+  - The screen follows whoever is in front, waits about 3 seconds for anyone
+    held at its left edge, then brings them along.
+  - This works on one computer too, with 3 to 5 controllers.
 
 
 =====================================================================

@@ -98,6 +98,21 @@ public:
   // game's player); reset each line too.
   uint64_t objAlt2Mask[2] = {};
   uint16_t objAlt2Colors[16] = {};
+  // ... and more players' (SMB1 co-op's third to fifth), each group with
+  // colours and tiles of its own as objAlt's (masks reset each line too).
+  static constexpr int kObjExtra = 3;
+  struct ObjExtra {
+    uint64_t mask[2] = {};
+    uint16_t colors[16] = {};
+    uint16_t tiles[256] = {};
+    uint16_t tileBase = 0, tileWords = 0;
+  };
+  ObjExtra objExtra[kObjExtra];
+  int objExtraOf(int idx) const {
+    for (int g = 0; g < kObjExtra; g++)
+      if ((objExtra[g].mask[idx >> 6] >> (idx & 63)) & 1) return g;
+    return -1;
+  }
   bool hideWideBg[4] = {};   // hide BG layer pixels in the margins
   int16_t bgHofsAdj[4] = {};  // extra horizontal scroll for this line (per BG layer)
   bool wideFetchAll[4] = {};  // ask fetchWideTile for every pixel of the layer, not only margins

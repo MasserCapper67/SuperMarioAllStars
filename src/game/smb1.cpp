@@ -256,14 +256,16 @@ void Smb1Engine::reset() {
   fillValid_ = fillMtValid_ = false;
   fresh_ = 0;
   for (uint8_t& b : oamXSet_) b = 0;
-  p2Valid_ = p2Drawn_ = p2Known_ = false;  // (co-op: Luigi comes back beside Mario)
-  luigiLive_ = liveCtrl_ = false;
+  for (CoopPl& p : pl_) p.valid = p.drawn = p.known = p.wait = false;  // (co-op: the others come back beside the game's player)
+  live_ = 0;
+  baseKnown_ = false;
+  cur_ = b0Owner_ = liveDrawn_ = -1;
   coopMove_ = coopDrawPhase_ = 0;
   coopEnemy_ = -1;
-  coopObjPhase_ = coopHamPhase_ = vicPhase_ = 0;
+  coopObjPhase_ = coopHamPhase_ = vicPhase_ = coopWhirlPhase_ = 0;
   starMusic_ = false;
-  p2Wait_ = false;
   coopFirePhase_ = 0;
+  lockForced_ = false;
 }
 
 namespace {
@@ -862,6 +864,7 @@ bool Smb1Engine::onExec(uint32_t pc) {
       snes_.ppu.objTrueX[i] = (int16_t)x;
       snes_.ppu.objTrueXSet[i] = set;
     }
+    if (coopOk_) coopLatch();  // (co-op: who is in which entries, see smb1coop.cpp)
     return false;
   }
   if (pc == springSlot_) {
@@ -1223,8 +1226,8 @@ bool Smb1Engine::onExec(uint32_t pc) {
     // (Nor for a co-op brother left standing: see coopIdleSafe. The other's
     // drawing is in his turn.)
     if (!(cheats_ & kCheatNoDamage)) {
-      const int gPad = liveCtrl_ ? 1 : 0, pad = coop_ && (coopMove_ == 1 || coopDrawPhase_ == 1) ? 1 - gPad : gPad;
-      if (!coop_ || !idleSafe_[pad] || ram(0x07AE) > 2) return false;
+      const int id = coop_ && (coopMove_ == 1 || coopDrawPhase_ == 1) && cur_ >= 0 ? cur_ : live_;
+      if (!coop_ || !pl_[id].idleSafe || ram(0x07AE) > 2) return false;
     }
     return loadA(0);
   }
@@ -1697,24 +1700,25 @@ void Smb1Engine::applyWarp() {
 }
 
 std::string Smb1Engine::debug() const {
-  char buf[1024];
+  char buf[2048];
   int n = snprintf(buf, sizeof buf, "cam=%d parser=%d ext=%d+%d hofs1=%d bg2 src=%d off=%d period=%d cols:", camera(),
                    parserPos(), extL_, extR_, snes_.ppu.bgHofs(0), bg2Source_, bg2Off_, bg2Period_);
   for (int i = 0; i < 64; i++) n += snprintf(buf + n, sizeof buf - n, " %d", colWorld_[i]);
   n += snprintf(buf + n, sizeof buf - n, " areaLeft=%d fill=%d/%d", areaLeft_, fillValid_, fillMtValid_);
-  if (coopOk_ && coop_ && !p2_.empty())
-    snprintf(buf + n, sizeof buf - n,
-             "\n  coop: p2 valid=%d drawn=%d x=%d y=%d hi=%d state=%d task=%d | p1 x=%d | p2 tiles %04X words %d first %04X"
-             "\n  coop2: wait=%d out=%d size=%d status=%d inj=%d star=%d spring=%d | p1 y=%d size=%d status=%d lives=%d "
-             "luigiLive=%d hooks %06X %06X %06X %04X attr=%02X cb=%02X xs=%02X alt=%llx/%llx shown=%d/%d held %d/%d %d/%d"
-             " still %u/%u safe %d/%d live %d",
-             p2Valid_, p2Drawn_, p2X(), p2Var(0x0237), p2Var(0x00BB), p2Var(0x0028), ram(0x000f),
-             ram(0x0078) * 256 + ram(0x0219), p2TileBase_, p2TileWords_,
-             [&] { int t = 0; for (uint16_t v : p2Tiles_) t += v; return t & 0xffff; }(), p2Wait_, p2Out_,
-             p2Var(0x0754), p2Var(0x0756), p2Var(0x07AE), p2Var(0x07AF), p2Var(0x070E), ram(0x0237), ram(0x0754),
-             ram(0x0756), ram(0x075A), luigiLive_, coopHammer_, coopStar_, enemyCall_, collBits_, p2Var(0x0256), p2Var(0x0480), p2Var(0x005D),
-             (unsigned long long)altBits_, (unsigned long long)alt2Bits_, (int)p2Shown_, (int)liveLuigiShown_, heldHave_[0], heldNeed_[0], heldHave_[1], heldNeed_[1],
-             still_[0], still_[1], (int)idleSafe_[0], (int)idleSafe_[1], (int)liveCtrl_);
+  if (coopOk_ && coop_) {
+    n += snprintf(buf + n, sizeof buf - n, "\n  coop: live P%d (x=%d y=%d) lead P%d task=%d lives=%d alt=%llx/%llx held %d/%d %d/%d",
+                  live_ + 1, ram(0x0078) * 256 + ram(0x0219), ram(0x0237), lead_ + 1, ram(0x000f), ram(0x075A),
+                  (unsigned long long)altBits_, (unsigned long long)alt2Bits_, heldHave_[0], heldNeed_[0], heldHave_[1],
+                  heldNeed_[1]);
+    for (int id = 0; id < kCoopMax && n < (int)sizeof buf - 120; id++) {
+      const CoopPl& p = pl_[id];
+      if (!p.in || id == live_) continue;
+      n += snprintf(buf + n, sizeof buf - n,
+                    "\n  P%d: valid=%d wait=%d out=%d drawn=%d x=%d y=%d hi=%d size=%d status=%d idle=%u edge=%u colour=%d inj=%d safe=%d",
+                    id + 1, p.valid, p.wait, p.out, p.drawn, xOf(id), gv(id, 0x0237),
+                    gv(id, 0x00BB), gv(id, 0x0754), gv(id, 0x0756), p.idle, p.edge, variantOf(id), gv(id, 0x07AE), p.idleSafe);
+    }
+  }
   return buf;
 }
 

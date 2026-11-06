@@ -16,6 +16,9 @@ WRAM is `7E0000-7FFFFF` (also mirrored at `000000-001FFF`).
 | `rewindtest PLAY BACK` | check the rewind buffer: play PLAY frames (held buttons, A pulsed), rewind BACK snapshots as the app does, replay, and compare with the first run |
 | `hold BTN` | set player-1 buttons, e.g. `hold right+b`, `hold none` (b,y,a,x,l,r,up,down,left,right,start,select) |
 | `hold2 BTN` | player-2 buttons |
+| `hold3 BTN` .. `hold5 BTN` | players 3-5's buttons (co-op: they drop in with `start`) |
+| `present HEX` | which players are there (bit per player; online play's session, default 1F) |
+| `hash` | frame, CPU cycles, scanline, a hash of WRAM and the APU's cycles (comparing two runs frame by frame) |
 | `press BTN N M` | hold BTN for N frames, release, run M more frames |
 | `save PATH` / `load PATH` | save state / load state |
 | `wide E` | request widescreen margin E pixels per side (game layer may clamp) |

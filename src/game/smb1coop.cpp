@@ -1,9 +1,12 @@
-// Two-player co-op for Super Mario Bros. (experimental).
+// Co-op for Super Mario Bros. and The Lost Levels (experimental): up to five
+// players at once.
 //
 // The game only ever has one player: Luigi of a 2-player game takes turns in
-// Mario's place, in the same variables. Here Luigi plays at the same time,
-// on the second controller, by running the game's own player routines a
-// second time each frame with his variables swapped in:
+// Mario's place, in the same variables. Here the others play at the same
+// time, each on his own controller (P2 from the start of a co-op game, P3-P5
+// dropping in with Start), by running the game's own player routines again
+// each frame with each one's variables swapped in in turn (what follows says
+// Luigi for any of them):
 //  * GameCoreRoutine calls GameRoutines (the player's routine for the task in
 //    hand: under control, PlayerCtrlRoutine: movement, jumping, the screen's
 //    scrolling, collision with the level). After Mario's call returns, the
@@ -138,7 +141,11 @@ int varIndex(uint16_t a) {
     if (kVars[i] == a) return i;
   return -1;
 }
+// The screen waits at its left edge for one held there this long (3 s),
+// then brings him on to the one in front (see coopBringIdle).
+constexpr uint32_t kEdgeWait = 180;
 }  // namespace
+
 
 void Smb1Engine::coopInit(uint8_t bankLo, uint8_t bankHi) {
   uint32_t core = findSig(kSigCore, sizeof(kSigCore) / 2, bankLo, bankHi);
@@ -278,9 +285,30 @@ void Smb1Engine::coopInit(uint8_t bankLo, uint8_t bankHi) {
   }
   objBefore_.assign(0x2000, 0);
   objAfter_.assign(0x2000, 0);
-  p2_.assign(kVarCount, 0);
+  objWorld_.assign(0x2000, 0);
+  for (CoopPl& p : pl_) p.v.assign(kVarCount, 0);
   p1Hold_.assign(kVarCount, 0);
   keepHold_.assign(kKeepCount, 0);
+}
+
+void Smb1Engine::coopReset() {
+  for (int id = 0; id < kCoopMax; id++) {
+    CoopPl& p = pl_[id];
+    std::vector<uint8_t> v;
+    v.swap(p.v);
+    const int colour = p.colour;  // (a pick stays: see coopFrame)
+    p = CoopPl();
+    p.v.swap(v);
+    p.colour = colour;
+    p.in = id < 2;  // (P1 and P2 from the start, as the title's CO-OP GAME; P3-P5 with Start)
+    p.prevRaw = 0xffff;
+  }
+  live_ = 0;
+  cur_ = -1;
+  lead_ = 0;
+  b0Owner_ = -1;
+  luigiBase_ = baseKnown_ = false;
+  boxAfterSwap_ = false;
 }
 
 void Smb1Engine::setCoop(bool on) {
@@ -289,39 +317,85 @@ void Smb1Engine::setCoop(bool on) {
   if (on && ram(0x077A) != 0) on = false;
   if (on == coop_) return;
   coop_ = on;
-  p2Valid_ = p2Drawn_ = p2Known_ = false;
+  coopReset();
   deathTune_ = false;
   musicBack_ = 0;
-  luigiLive_ = liveCtrl_ = false;
-  p2Wait_ = p2Out_ = false;
 }
 
+int Smb1Engine::coopPlayers() const {
+  if (!coopActive()) return 1;
+  int n = 0;
+  for (const CoopPl& p : pl_) n += p.in;
+  return std::max(n, 1);
+}
+
+// Each player's colours: his own pick (Select in play, see coopFrame), else
+// Mario's and Luigi's chosen in the options for P1 and P2 and a colour each
+// for P3 (Fire's white and red), P4 (Ice's light blue) and P5 (Gold).
+int Smb1Engine::variantOf(int id) const {
+  if (id < 0 || id >= kCoopMax) return 0;
+  if (pl_[id].colour >= 0) return pl_[id].colour;
+  static const int kDefault[kCoopMax] = {0, 0, 2, 3, 5};
+  if (id >= 2) return kDefault[id];
+  return isLuigi(id) ? luigiVar_ : marioVar_;
+}
+
+uint8_t Smb1Engine::gv(int id, uint16_t a) const {
+  return id == live_ || pl_[id].v.empty() ? ram(a) : pl_[id].v[varIndex(a)];
+}
+
+uint16_t Smb1Engine::rawPad(int id) const { return id < 2 ? snes_.input[id] : extPads_[id]; }
+
+// The others taking turns, by controller (P1 first).
+int Smb1Engine::listOthers(int* out) const {
+  int n = 0;
+  for (int id = 0; id < kCoopMax; id++)
+    if (inPlay(id)) out[n++] = id;
+  return n;
+}
+
+namespace {
+int firstOther(int live, const bool* in) {
+  for (int id = 0; id < Smb1Engine::kCoopMax; id++)
+    if (id != live && in[id]) return id;
+  return live == 1 ? 0 : 1;
+}
+}  // namespace
+
 void Smb1Engine::coopPoke(uint16_t a, uint8_t v) {
-  int i = varIndex(a);
-  if (i >= 0 && !p2_.empty()) p2_[i] = v;
+  bool in[kCoopMax];
+  for (int k = 0; k < kCoopMax; k++) in[k] = pl_[k].in;
+  const int id = firstOther(live_, in);
+  const int i = varIndex(a);
+  if (i >= 0 && !pl_[id].v.empty()) pl_[id].v[i] = v;
 }
 
 uint8_t Smb1Engine::p2Var(uint16_t a) const {
+  bool in[kCoopMax];
+  for (int k = 0; k < kCoopMax; k++) in[k] = pl_[k].in;
+  const int id = firstOther(live_, in);
   const int i = varIndex(a);
-  return i >= 0 && !p2_.empty() ? p2_[i] : 0;
+  return i >= 0 && !pl_[id].v.empty() ? pl_[id].v[i] : 0;
 }
 
-int Smb1Engine::p2X() const { return p2_[varIndex(0x0078)] * 256 + p2_[varIndex(0x0219)]; }
-
-// Luigi beside Mario: Mario's variables, 16 px behind (where the screen
-// allows); his own power-up kept once he has one (after a pipe he was Mario's
-// size).
-void Smb1Engine::p2Sync() {
-  if (!p2Known_ && lostLevels_) luigiLive_ = ram(0x0753) != 0;  // (a Luigi game: Mario joins him)
-  const uint8_t size = p2_[varIndex(0x0754)], status = p2_[varIndex(0x0756)], star = p2_[varIndex(0x07AF)];
-  for (int i = 0; i < kVarCount; i++) p2_[i] = snes_.wram[kVars[i]];
+// Another player beside the game's: its variables, 16 px behind (where the
+// screen allows); his own power-up kept once he has one (after a pipe he was
+// the game's player's size).
+void Smb1Engine::p2Sync(int id) {
+  CoopPl& p = pl_[id];
+  // (The Lost Levels' Luigi game: P1 is Luigi, P2 Mario, and so on)
+  if (!baseKnown_ && live_ == 0) luigiBase_ = lostLevels_ && ram(0x0753) != 0;
+  baseKnown_ = true;
+  std::vector<uint8_t>& v = p.v;
+  const uint8_t size = v[varIndex(0x0754)], status = v[varIndex(0x0756)], star = v[varIndex(0x07AF)];
+  for (int i = 0; i < kVarCount; i++) v[i] = snes_.wram[kVars[i]];
   // (his own power-up and star, not the other's: a star was handed on)
-  p2_[varIndex(0x07AF)] = p2Known_ ? star : 0;
-  if (p2Known_) {
-    p2_[varIndex(0x0754)] = size;
-    p2_[varIndex(0x0756)] = status;
+  v[varIndex(0x07AF)] = p.known ? star : 0;
+  if (p.known) {
+    v[varIndex(0x0754)] = size;
+    v[varIndex(0x0756)] = status;
   }
-  p2Known_ = true;
+  p.known = true;
   // (behind him, into the left margin as far as players may go; at its edge,
   // ahead of him: on him, he was hidden. Where he stands on the level, only
   // with ground there too, else on him: he came back over a pit's edge, to
@@ -354,77 +428,82 @@ void Smb1Engine::p2Sync() {
     else if (room(x0 + 16)) x = x0 + 16;
     else x = x0;
   }
-  p2Box_[0] = boxL_[0] + (x - x0);
-  p2Box_[1] = boxR_[0] + (x - x0);
-  p2_[varIndex(0x0219)] = x & 0xff;
-  p2_[varIndex(0x0078)] = (x >> 8) & 0xff;
-  p2_[varIndex(0x0B45)] = kP2Oam;
-  // (The Lost Levels: the one kept aside is the other character, his own
-  // physics and sprites; in Super Mario Bros. both are the game's Mario but
-  // for colours (see coopLine). The game's player says which he is.)
+  p.box[0] = boxL_[0] + (x - x0);
+  p.box[1] = boxR_[0] + (x - x0);
+  v[varIndex(0x0219)] = x & 0xff;
+  v[varIndex(0x0078)] = (x >> 8) & 0xff;
+  v[varIndex(0x0B45)] = kP2Oam;
+  // (The Lost Levels: each his own character's physics and sprites; in Super
+  // Mario Bros. all are the game's Mario but for colours (see coopLine).)
   if (lostLevels_) {
-    const bool luigi = !luigiLive_;
-    p2_[varIndex(0x0753)] = luigi;
-    p2_[varIndex(0x0EC2)] = luigi;
+    const bool luigi = isLuigi(id);
+    v[varIndex(0x0753)] = luigi;
+    v[varIndex(0x0EC2)] = luigi;
   }
-  p2Box_[2] = (int)boxFrame_[0];
-  p2Valid_ = true;
+  p.box[2] = (int)boxFrame_[0];
+  p.valid = true;
   for (int k = 0; k < 10; k++) {
-    p2Plat_[k] = 0xff;
-    p2Coll_[k] = 0;
+    p.plat[k] = 0xff;
+    p.coll[k] = 0;
   }
-  std::fill(std::begin(p2Ham_), std::end(p2Ham_), 0);
+  std::fill(std::begin(p.ham), std::end(p.ham), 0);
 }
 
 // (With the variables, the player's box in level coordinates the widescreen
-// collision tests keep (see onExec's boundBox_): Mario's in the left margin
-// was tested against Luigi's otherwise, and its 8-bit wrap hit enemies at the
-// screen's right edge.)
-void Smb1Engine::swapPlayers(std::vector<uint8_t>& hold) {
+// collision tests keep (see onExec's boundBox_): the game's player's in the
+// left margin was tested against the other's otherwise, and its 8-bit wrap
+// hit enemies at the screen's right edge.)
+void Smb1Engine::swapPlayers(int id, std::vector<uint8_t>& hold) {
+  CoopPl& p = pl_[id];
+  cur_ = id;
   for (int i = 0; i < kVarCount; i++) {
     hold[i] = snes_.wram[kVars[i]];
-    snes_.wram[kVars[i]] = p2_[i];
+    snes_.wram[kVars[i]] = p.v[i];
   }
   boxHold_[0] = boxL_[0];
   boxHold_[1] = boxR_[0];
   boxHold_[2] = (int)boxFrame_[0];
-  boxL_[0] = p2Box_[0];
-  boxR_[0] = p2Box_[1];
-  boxFrame_[0] = (uint32_t)p2Box_[2];
+  boxL_[0] = p.box[0];
+  boxR_[0] = p.box[1];
+  boxFrame_[0] = (uint32_t)p.box[2];
 }
 
 void Smb1Engine::restorePlayer1(std::vector<uint8_t>& hold) {
+  if (cur_ < 0) return;
+  CoopPl& p = pl_[cur_];
   for (int i = 0; i < kVarCount; i++) {
-    p2_[i] = snes_.wram[kVars[i]];
+    p.v[i] = snes_.wram[kVars[i]];
     snes_.wram[kVars[i]] = hold[i];
   }
-  p2Box_[0] = boxL_[0];
-  p2Box_[1] = boxR_[0];
-  p2Box_[2] = (int)boxFrame_[0];
+  p.box[0] = boxL_[0];
+  p.box[1] = boxR_[0];
+  p.box[2] = (int)boxFrame_[0];
   boxL_[0] = boxHold_[0];
   boxR_[0] = boxHold_[1];
   boxFrame_[0] = (uint32_t)boxHold_[2];
+  cur_ = -1;
 }
 
-// Luigi's air bubbles, as the game's (SetupBubble) for its player: in a
+// Another's air bubbles, as the game's (SetupBubble) for its player: in a
 // water area, his own timer run out, into a free one of the three bubbles
 // (Y $F8), from his mouth (facing right 9 px on), the timer again from the
 // game's table by the bubble's random bit.
-void Smb1Engine::coopBubble() {
+void Smb1Engine::coopBubble(int id) {
   uint8_t* w = snes_.wram;
-  if (p2Bubble_) p2Bubble_--;
-  if (!bubbleTimes_ || !coop_ || !p2Valid_ || p2Out_ || p2Wait_ || w[0x000F] != 8 || w[0x005C] != 0 || w[0x0747] ||
-      p2_[varIndex(0x00BB)] != 1 || p2Bubble_)
+  CoopPl& p = pl_[id];
+  if (p.bubble) p.bubble--;
+  if (!bubbleTimes_ || !coop_ || !inPlay(id) || w[0x000F] != 8 || w[0x005C] != 0 || w[0x0747] ||
+      p.v[varIndex(0x00BB)] != 1 || p.bubble)
     return;
   for (int k = 0; k < 3; k++) {
     if (w[0x0251 + k] != 0xF8) continue;
-    const int off = (p2_[varIndex(0x0202)] & 1) ? 9 : 0;
-    const int x = p2_[varIndex(0x0219)] + off;
+    const int off = (p.v[varIndex(0x0202)] & 1) ? 9 : 0;
+    const int x = p.v[varIndex(0x0219)] + off;
     w[0x0233 + k] = (uint8_t)x;
-    w[0x0092 + k] = (uint8_t)(p2_[varIndex(0x0078)] + (x >> 8));
-    w[0x0251 + k] = (uint8_t)(p2_[varIndex(0x0237)] + 8);
+    w[0x0092 + k] = (uint8_t)(p.v[varIndex(0x0078)] + (x >> 8));
+    w[0x0251 + k] = (uint8_t)(p.v[varIndex(0x0237)] + 8);
     w[0x00D5 + k] = 1;
-    p2Bubble_ = snes_.peek(bubbleTimes_ + (w[0x07B8 + k] & 1));
+    p.bubble = snes_.peek(bubbleTimes_ + (w[0x07B8 + k] & 1));
     return;
   }
 }
@@ -436,136 +515,174 @@ int Smb1Engine::metatile(int px, int py) const {
   return (int)ram((((col >> 4) & 1) ? 0x05d0 : 0x0500) + row * 16 + (col & 15));
 }
 
-// The other player in play and on his feet: someone to come back beside
-// (with a life for it; or, for the game's player's death, without: on the
-// last life the other plays on and the one who died sits out, see p2Lose,
-// whichever of them it was; the game's player's death was the game over).
-bool Smb1Engine::p2Alive(bool needLife) const {
+// Another player in play and on his feet: someone to come back beside (with
+// a life for it; or, for the game's player's death, without: on the last life
+// the others play on and the one who died sits out, see p2Lose, whichever of
+// them it was; the game's player's death with none was the game over).
+bool Smb1Engine::p2Alive(int id, bool needLife) const {
+  if (!inPlay(id)) return false;
+  const std::vector<uint8_t>& v = pl_[id].v;
   // (not one already below the floor, falling into a pit: he'd play on for a moment)
-  const bool sinking = p2_[varIndex(0x00BB)] == 1 && p2_[varIndex(0x0237)] >= 0xD0;
-  return coop_ && p2Valid_ && !p2Out_ && !p2Wait_ && (int8_t)p2_[varIndex(0x00BB)] < 2 && !sinking &&
-         (!needLife || snes_.wram[0x075A] > 0);
+  const bool sinking = v[varIndex(0x00BB)] == 1 && v[varIndex(0x0237)] >= 0xD0;
+  return coop_ && (int8_t)v[varIndex(0x00BB)] < 2 && !sinking && (!needLife || snes_.wram[0x075A] > 0);
 }
 
-// The cheats for the other player as for the game's (the star, no damage,
+// The one to carry on for the game's player (his death, his leaving): the
+// furthest right of the others alive (the screen is there).
+int Smb1Engine::heir() const {
+  int best = -1;
+  for (int id = 0; id < kCoopMax; id++)
+    if (p2Alive(id, false) && (best < 0 || xOf(id) > xOf(best))) best = id;
+  return best;
+}
+
+// The cheats for the others as for the game's player (the star, no damage,
 // fire, the moon jump): they had followed whichever was the game's player.
 void Smb1Engine::coopCheats(uint32_t f) {
-  if (!coop_ || !p2Valid_ || p2Out_ || p2_.empty() || coopMidTurn()) return;
-  if ((f & kCheatStar) && p2_[varIndex(0x07AF)] < 0x10) p2_[varIndex(0x07AF)] = 0x10;
-  if ((f & kCheatNoDamage) && p2_[varIndex(0x07AE)] < 2) p2_[varIndex(0x07AE)] = 2;
-  if (f & kCheatFire) {
-    p2_[varIndex(0x0756)] = 2;
-    p2_[varIndex(0x0754)] = 0;
+  if (!coop_ || coopMidTurn()) return;
+  for (int id = 0; id < kCoopMax; id++) {
+    CoopPl& p = pl_[id];
+    if (id == live_ || !p.in || !p.valid || p.out || p.v.empty()) continue;
+    std::vector<uint8_t>& v = p.v;
+    if ((f & kCheatStar) && v[varIndex(0x07AF)] < 0x10) v[varIndex(0x07AF)] = 0x10;
+    if ((f & kCheatNoDamage) && v[varIndex(0x07AE)] < 2) v[varIndex(0x07AE)] = 2;
+    if (f & kCheatFire) {
+      v[varIndex(0x0756)] = 2;
+      v[varIndex(0x0754)] = 0;
+    }
+    if ((f & kCheatMoonJump) && (rawPad(id) & kPadB) && (int8_t)v[varIndex(0x00A0)] > 1) v[varIndex(0x00A0)] = 1;
   }
-  if ((f & kCheatMoonJump) && (snes_.input[liveCtrl_ ? 0 : 1] & kPadB) && (int8_t)p2_[varIndex(0x00A0)] > 1)
-    p2_[varIndex(0x00A0)] = 1;
 }
 
-// One left idle (3 s) at the screen's left edge, the other well on: brought
-// to the other, where he stands. (The edge pushed him on with the screen,
-// through pipes and walls and into pits, a life each.)
+// One left behind at the screen's left edge while the one in front is well on
+// is brought to him, where he stands: one left idle (3 s), or one held there
+// a while (kEdgeWait: the screen waits for him that long, then pulls him on).
+// (The edge pushed him on with the screen, through pipes and walls and into
+// pits, a life each.)
 void Smb1Engine::coopBringIdle() {
   uint8_t* w = snes_.wram;
-  if (!coop_ || !p2Valid_ || p2Out_ || p2Wait_ || w[0x000F] != 8 || w[0x0770] != 1 || p2_.empty()) return;
+  if (!coop_ || w[0x000F] != 8 || w[0x0770] != 1) return;
+  int ids[kCoopMax], n = 0;
+  ids[n++] = live_;
+  {
+    int o[kCoopMax];
+    const int k = listOthers(o);
+    for (int i = 0; i < k; i++) ids[n++] = o[i];
+  }
+  if (n < 2) return;
   const int left = playerLeftLimit();
-  const int gx = w[0x0078] * 256 + w[0x0219], px = p2X();
-  const int gPad = liveCtrl_ ? 1 : 0, pPad = 1 - gPad;
-  // (each on his feet: Player_State 0, on the screen; or swimming, see coopStands)
-  const bool gStands = coopStands(false), pStands = coopStands(true);
   // (Where each last stood on the floor: one in the air or swimming brings
   // the other there, so the screen didn't wait at its edge through each jump.
   // Kept while that spot is still well ahead on the screen.)
   static const uint16_t kAt[5] = {0x0078, 0x0219, 0x0237, 0x00BB, 0x0028};
-  auto onFloor = [&](bool p2) {
-    auto v = [&](uint16_t a) { return p2 ? p2_[varIndex(a)] : w[a]; };
-    return v(0x00BB) == 1 && v(0x0028) == 0;
-  };
+  auto onFloor = [&](int id) { return gv(id, 0x00BB) == 1 && gv(id, 0x0028) == 0; };
   const int area = w[0x0750] << 16 | w[0x0760] << 8 | w[0x075F];  // (area pointer, area, world)
   if (stoodArea_ != area) {
     stoodArea_ = area;
-    stoodOk_[0] = stoodOk_[1] = false;
+    for (CoopPl& p : pl_) p.stoodOk = false;
   }
-  for (int k = 0; k < 2; k++)
-    if (onFloor(k == 1)) {
-      for (int i = 0; i < 5; i++) stoodAt_[k][i] = k ? p2_[varIndex(kAt[i])] : w[kAt[i]];
-      stoodOk_[k] = true;
+  for (int i = 0; i < n; i++)
+    if (onFloor(ids[i])) {
+      CoopPl& p = pl_[ids[i]];
+      for (int k = 0; k < 5; k++) p.stood[k] = gv(ids[i], kAt[k]);
+      p.stoodOk = true;
     }
-  // Where to bring one left idle, by the other (k): where the other last
+  // Where to bring one left behind, by the one in front (k): where he last
   // stood on the floor, still on the screen ahead of the edge (at least
   // `from` px in); else, swimming, where he is now.
   auto target = [&](int k, int from, uint8_t* to) {
-    const int x = stoodAt_[k][0] * 256 + stoodAt_[k][1];
-    if (stoodOk_[k] && x >= left + from) {
-      std::copy(stoodAt_[k], stoodAt_[k] + 5, to);
+    const CoopPl& p = pl_[k];
+    const int x = p.stood[0] * 256 + p.stood[1];
+    if (p.stoodOk && x >= left + from) {
+      std::copy(p.stood, p.stood + 5, to);
       return true;
     }
-    if (!(k ? pStands : gStands)) return false;
-    for (int i = 0; i < 5; i++) to[i] = k ? p2_[varIndex(kAt[i])] : w[kAt[i]];
+    if (!coopStands(k)) return false;
+    for (int i = 0; i < 5; i++) to[i] = gv(k, kAt[i]);
     return true;
   };
   // (Falling into a hole: below the floor's level, not on it. One left idle
   // there is brought back instead: sinking in water by a swimmer, pushed on
   // by the screen, he lost a life each time.)
-  auto falling = [&](bool p2) {
-    auto v = [&](uint16_t a) { return p2 ? p2_[varIndex(a)] : w[a]; };
-    return v(0x00BB) == 1 && v(0x0237) >= 0xD0 && v(0x0028) != 0;
-  };
-  uint8_t to[5];
-  const bool pIdle = idle_[pPad] >= 180 && idle_[gPad] < 180, gIdle = idle_[gPad] >= 180 && idle_[pPad] < 180;
-  if (idle_[pPad] >= 180 && ((px <= left + 4 && gx > px + 32 && target(0, 24, to)) ||
-                             (pIdle && falling(true) && target(0, 8, to)))) {
-    for (int i = 0; i < 5; i++) p2_[varIndex(kAt[i])] = to[i];
-    for (uint16_t a : {0x005D, 0x00A0, 0x0700, 0x0705}) p2_[varIndex(a)] = 0;
-    p2Box_[2] = 0;  // (his box from his new place: see swapPlayers)
-  } else if (idle_[gPad] >= 180 && ((gx <= left + 4 && px > gx + 32 && target(1, 24, to)) ||
-                                    (gIdle && falling(false) && target(1, 8, to)))) {
-    for (int i = 0; i < 5; i++) w[kAt[i]] = to[i];
-    for (uint16_t a : {0x005D, 0x00A0, 0x0700, 0x0705}) w[a] = 0;
-    boxFrame_[0] = 0;
-  } else if ((pIdle && falling(true)) || (gIdle && falling(false) && p2Alive(false))) {
-    // Nowhere to bring him (the other high in the air, his last floor off the
-    // screen: The Lost Levels' springs): he rests out of play, no life lost,
-    // and comes back beside the other once he stands (see p2Return). The game's
-    // player hands over to the other first.
-    if (gIdle) swapRoles();
-    p2Valid_ = false;
-    p2Wait_ = true;
-    restWait_ = true;
+  auto falling = [&](int id) { return gv(id, 0x00BB) == 1 && gv(id, 0x0237) >= 0xD0 && gv(id, 0x0028) != 0; };
+  int lead = ids[0];
+  for (int i = 1; i < n; i++)
+    if (xOf(ids[i]) > xOf(lead)) lead = ids[i];
+  for (int i = 0; i < n; i++) {
+    const int id = ids[i];
+    if (id == lead || !(id == live_ || inPlay(id))) continue;
+    CoopPl& p = pl_[id];
+    bool othersActive = false;
+    for (int j = 0; j < n; j++) othersActive = othersActive || (ids[j] != id && pl_[ids[j]].idle < 180);
+    const bool idle = p.idle >= 180;
+    const int x = xOf(id);
+    uint8_t to[5];
+    const bool stuck = x <= left + 4 && xOf(lead) > x + 32 && (idle || p.edge >= kEdgeWait);
+    if ((stuck && target(lead, 24, to)) || (idle && othersActive && falling(id) && target(lead, 8, to))) {
+      if (id == live_) {
+        for (int k = 0; k < 5; k++) w[kAt[k]] = to[k];
+        for (uint16_t a : {0x005D, 0x00A0, 0x0700, 0x0705}) w[a] = 0;
+        boxFrame_[0] = 0;
+      } else {
+        for (int k = 0; k < 5; k++) p.v[varIndex(kAt[k])] = to[k];
+        for (uint16_t a : {0x005D, 0x00A0, 0x0700, 0x0705}) p.v[varIndex(a)] = 0;
+        p.box[2] = 0;  // (his box from his new place: see swapPlayers)
+      }
+      p.edge = 0;
+    } else if (idle && othersActive && falling(id)) {
+      // Nowhere to bring him (the one in front high in the air, his last
+      // floor off the screen: The Lost Levels' springs): he rests out of
+      // play, no life lost, and comes back beside the game's player once that
+      // one stands (see p2Return). The game's player hands over first.
+      if (id == live_) {
+        const int h = heir();
+        if (h < 0) continue;
+        swapRoles(h);
+      }
+      p.valid = false;
+      p.wait = true;
+      p.restWait = true;
+    }
   }
 }
 
-// One left standing (his controller untouched for 3 s) while the other plays
+// One left standing (his controller untouched for 3 s) while the others play
 // on can't be hurt till he moves: he couldn't dodge (a Goomba walked into
 // him). His injury timer ([InjuryTimer] $07AE, what a hit's grace runs on,
 // every 21 frames) kept at 2, without the blink (see blinkLda_); back to 0
 // when he moves, unless a real grace is still running past it.
 void Smb1Engine::coopIdleSafe() {
   uint8_t* w = snes_.wram;
-  const int gPad = liveCtrl_ ? 1 : 0, pPad = 1 - gPad;
-  const bool play = coop_ && p2Valid_ && !p2Out_ && !p2Wait_ && !p2_.empty() && w[0x000F] == 8 && w[0x0770] == 1;
-  for (int k = 0; k < 2; k++) {
-    const int pad = k ? pPad : gPad, other = 1 - pad;
-    if (k && p2_.empty()) {
-      idleSafe_[pad] = false;
+  int o[kCoopMax];
+  const bool play = coop_ && listOthers(o) > 0 && w[0x000F] == 8 && w[0x0770] == 1;
+  for (int id = 0; id < kCoopMax; id++) {
+    CoopPl& p = pl_[id];
+    const bool here = id == live_ || inPlay(id);
+    if (!here || p.v.empty()) {
+      p.idleSafe = false;
       continue;
     }
-    uint8_t& t = k ? p2_[varIndex(0x07AE)] : w[0x07AE];
-    if (play && still_[pad] >= 180 && still_[other] < 180) {
+    uint8_t& t = id == live_ ? w[0x07AE] : p.v[varIndex(0x07AE)];
+    bool othersMove = false;
+    for (int j = 0; j < kCoopMax; j++)
+      othersMove = othersMove || (j != id && (j == live_ || inPlay(j)) && pl_[j].still < 180);
+    if (play && p.still >= 180 && othersMove) {
       if (t < 2) t = 2;
-      idleSafe_[pad] = true;
-    } else if (idleSafe_[pad]) {
+      p.idleSafe = true;
+    } else if (p.idleSafe) {
       if (t <= 2) t = 0;
-      idleSafe_[pad] = false;
+      p.idleSafe = false;
     }
   }
 }
 
-// In the middle of a turn of the other player's (his variables in, the
-// game's player's kept aside): a frame the game overran ends there. Not a
-// moment for a save state or rewind's snapshot (see the app).
+// In the middle of a turn of another player's (his variables in, the game's
+// player's kept aside): a frame the game overran ends there. Not a moment for
+// a save state or rewind's snapshot (see the app).
 bool Smb1Engine::coopMidTurn() const {
   return coopMove_ || coopDrawPhase_ || coopWhirlPhase_ || coopFirePhase_ || coopObjPhase_ || coopHamPhase_ || vicPhase_ ||
-         coopEnemy_ >= 0 || lockForced_;  // (... or the game's player's turn with the screen's lock set for it)
+         coopEnemy_ >= 0 || cur_ >= 0 ||
+         lockForced_;  // (... or the game's player's turn with the screen's lock set for it)
 }
 
 // Somewhere to come back: the game's player on his feet (on the ground or a
@@ -580,35 +697,56 @@ bool Smb1Engine::p2CanReturn() const {
   return ram(0x00BB) == 1 && (ram(0x0028) == 0 || ram(0x005C) == 0 || lift);
 }
 
-// The two players change places: the one kept aside becomes the game's
+// The game's player and another change places: that one becomes the game's
 // player and the game's player is kept aside (each OAM slot stays its own).
-// Either character can be either: whoever takes a pipe, a vine or the flag,
+// Any character can be the game's: whoever takes a pipe, a vine or the flag,
 // or carries on after the other's death, is the game's player from then on.
-void Smb1Engine::swapRoles() {
+void Smb1Engine::swapRoles(int id) {
   uint8_t* w = snes_.wram;
+  if (id == live_ || id < 0) return;
+  const int old = live_;
+  CoopPl& np = pl_[id];
+  CoopPl& op = pl_[old];
   const int o = varIndex(0x0B45);
-  const uint8_t oamLive = w[0x0B45], oamOther = p2_[o];
-  for (int i = 0; i < kVarCount; i++) std::swap(w[kVars[i]], p2_[i]);
+  const uint8_t oamLive = w[0x0B45], oamOther = np.v[o];
+  op.v.resize(kVarCount);
+  for (int i = 0; i < kVarCount; i++) {
+    op.v[i] = w[kVars[i]];
+    w[kVars[i]] = np.v[i];
+  }
   w[0x0B45] = oamLive;
-  p2_[o] = oamOther;
-  std::swap(boxL_[0], p2Box_[0]);
-  std::swap(boxR_[0], p2Box_[1]);
-  int f = (int)boxFrame_[0];
-  boxFrame_[0] = (uint32_t)p2Box_[2];
-  p2Box_[2] = f;
-  luigiLive_ = !luigiLive_;
-  liveCtrl_ = !liveCtrl_;
-  lastP2Inj_ = p2_[varIndex(0x07AE)];  // (the other's, not a hit)
+  op.v[o] = oamOther;
+  op.box[0] = boxL_[0];
+  op.box[1] = boxR_[0];
+  op.box[2] = (int)boxFrame_[0];
+  boxL_[0] = np.box[0];
+  boxR_[0] = np.box[1];
+  boxFrame_[0] = (uint32_t)np.box[2];
+  // (what the one kept aside had, the one now kept aside takes on: his last
+  // buttons, his place on lifts, the hammers', his animation frame's tiles)
+  std::copy(np.buttons, np.buttons + 3, op.buttons);
+  op.prevAB = np.prevAB;
+  std::copy(np.plat, np.plat + 10, op.plat);
+  std::copy(np.ham, np.ham + 16, op.ham);
+  std::copy(np.tiles, np.tiles + 256, op.tiles);
+  op.tileBase = np.tileBase;
+  op.tileWords = np.tileWords;
+  op.valid = true;
+  op.out = op.wait = op.restWait = false;
+  op.known = true;
+  op.lastInj = op.v[varIndex(0x07AE)];  // (his own, not a hit)
+  op.lastIc = np.lastIc;                 // (his timers counted on from the role's last count)
+  live_ = id;
   // (Each enemy's "touching the player" bit is the game's player's, the
-  // other's kept aside (see coopEnemyAt_): swapped with the roles. Kept, the
+  // others' kept aside (see coopEnemyAt_): swapped with the roles. Kept, the
   // one taking over had the other's touch: small Mario killed by a Koopa,
   // Luigi walked through it as if already touching it, ten frames.)
   if (collBits_)
     for (int k = 0; k < 10; k++) {
       uint8_t& b = w[collBits_ + k];
       const uint8_t mine = b & 1;
-      b = (uint8_t)((b & ~1) | (p2Coll_[k] & 1));
-      p2Coll_[k] = mine;
+      b = (uint8_t)((b & ~1) | (np.coll[k] & 1));
+      op.coll[k] = mine;
     }
   // (The game's own box for its player ($0F9C) is still the other's till his
   // update works it out again: until then nothing meets him (see collide_).
@@ -617,73 +755,143 @@ void Smb1Engine::swapRoles() {
   boxAfterSwap_ = true;
 }
 
-// The player kept aside lost a life (an enemy, a hole): lives are shared,
-// one each death; he comes back beside the other once he's on his feet
-// (p2Return). With none left he sits out until the next area or try.
-void Smb1Engine::p2Lose() {
+// A player kept aside lost a life (an enemy, a hole): lives are shared, one
+// each death; he comes back beside the game's player once that one is on his
+// feet (p2Return). With none left he sits out until the next area or try.
+void Smb1Engine::p2Lose(int id) {
   uint8_t* w = snes_.wram;
-  p2Valid_ = false;
+  CoopPl& p = pl_[id];
+  p.valid = false;
   p2Hurts_++;
   deathTune_ = true;
   if (w[0x075A] > 0) {
     w[0x075A]--;
-    p2Wait_ = true;
+    p.wait = true;
   } else {
-    p2Out_ = true;
+    p.out = true;
   }
 }
 
-void Smb1Engine::p2Return() {
-  p2Wait_ = false;
-  p2Sync();
+void Smb1Engine::p2Return(int id) {
+  CoopPl& p = pl_[id];
+  p.wait = false;
+  p2Sync(id);
   for (uint16_t a : {0x005D, 0x0700, 0x0705})  // (standing: the other's run not handed on, he slid)
-    p2_[varIndex(a)] = 0;
-  if (restWait_) {  // (an idle brother kept out of a hole (see coopBringIdle): as he was)
-    restWait_ = false;
+    p.v[varIndex(a)] = 0;
+  if (p.restWait) {  // (an idle one kept out of a hole (see coopBringIdle): as he was)
+    p.restWait = false;
     return;
   }
-  p2_[varIndex(0x0754)] = 1;     // small
-  p2_[varIndex(0x0756)] = 0;
-  p2_[varIndex(0x07AE)] = 0x08;  // blinking a while (as after a hit)
-  lastP2Inj_ = 0x08;
+  p.v[varIndex(0x0754)] = 1;  // small
+  p.v[varIndex(0x0756)] = 0;
+  p.v[varIndex(0x07AE)] = 0x08;  // blinking a while (as after a hit)
+  p.lastInj = 0x08;
 }
 
-// The second player, kept in save states and rewind: a tagged block after
-// the widescreen state ('C', a version, then the variables kept aside and
-// how they stand). States without it (or another list of variables) bring
-// him back beside the game's player.
+// A player drops in (Start on his controller): beside the game's player at his
+// first turn, his lives added to the shared pool (5, once a game).
+void Smb1Engine::coopJoin(int id) {
+  uint8_t* w = snes_.wram;
+  CoopPl& p = pl_[id];
+  p.in = true;
+  p.valid = p.out = p.wait = p.restWait = p.known = p.drawn = p.idleSafe = false;
+  p.idle = p.still = 0;
+  p.edge = p.startHeld = 0;
+  if (!p.granted) {
+    p.granted = true;
+    w[0x075A] = (uint8_t)std::min(w[0x075A] + 5, 98);
+  }
+  coopMsg_ = "P" + std::to_string(id + 1) + " joined";
+}
+
+// ... and out (Start held, or gone from the session): the game's player hands
+// over to another first (P1, beside him, if none is in play).
+void Smb1Engine::coopLeave(int id) {
+  CoopPl& p = pl_[id];
+  if (id == live_) {
+    int h = heir();
+    if (h < 0) {
+      h = 0;
+      CoopPl& p1 = pl_[0];
+      p1.in = true;
+      p1.out = p1.wait = p1.restWait = false;
+      p2Sync(0);
+    }
+    swapRoles(h);
+  }
+  p.in = false;
+  p.valid = p.drawn = p.idleSafe = p.wait = p.out = false;
+  p.startHeld = 0;
+  coopMsg_ = "P" + std::to_string(id + 1) + " left";
+}
+
+// The players, kept in save states and rewind: a tagged block after the
+// widescreen state ('C', a version, then each player's variables kept aside
+// and how they stand). States without it bring them back beside the game's
+// player. (Version 1, two players: still loaded.)
+namespace {
+void putU16(std::vector<uint8_t>& out, uint16_t v) {
+  out.push_back((uint8_t)v);
+  out.push_back((uint8_t)(v >> 8));
+}
+void putU32(std::vector<uint8_t>& out, uint32_t v) {
+  for (int k = 0; k < 4; k++) out.push_back((uint8_t)(v >> (8 * k)));
+}
+}  // namespace
+
 void Smb1Engine::coopSave(std::vector<uint8_t>& out) const {
-  if (!coopOk_ || p2_.empty()) return;
+  if (!coopOk_ || pl_[0].v.empty()) return;
   out.push_back('C');
-  out.push_back(1);  // (version)
-  out.push_back((uint8_t)((int)p2Valid_ | p2Out_ << 1 | p2Known_ << 2 | luigiLive_ << 3 | p2Drawn_ << 4 | liveCtrl_ << 5 |
-                           p2Wait_ << 6));
+  out.push_back(2);  // (version)
+  out.push_back((uint8_t)((int)baseKnown_ | luigiBase_ << 1 | titleShown_ << 2));
+  out.push_back((uint8_t)live_);
+  out.push_back((uint8_t)titleCursor_);
+  out.push_back((uint8_t)kCoopMax);
   out.push_back((uint8_t)kVarCount);
-  out.insert(out.end(), p2_.begin(), p2_.end());
-  for (int v : p2Box_)
-    for (int k = 0; k < 4; k++) out.push_back((uint8_t)(v >> (8 * k)));
-  out.insert(out.end(), p2Buttons_, p2Buttons_ + 3);
-  out.push_back(p2PrevAB_);
-  for (uint16_t v : {p2TileBase_, p2TileWords_}) {
-    out.push_back((uint8_t)v);
-    out.push_back((uint8_t)(v >> 8));
+  for (const CoopPl& p : pl_) {
+    out.push_back((uint8_t)((int)p.in | p.valid << 1 | p.out << 2 | p.wait << 3 | p.known << 4 | p.restWait << 5 |
+                            p.drawn << 6 | p.granted << 7));
+    out.push_back((uint8_t)(int8_t)p.colour);
+    out.insert(out.end(), p.v.begin(), p.v.end());
+    for (int v : p.box) putU32(out, (uint32_t)v);
+    out.insert(out.end(), p.buttons, p.buttons + 3);
+    out.push_back(p.prevAB);
+    out.push_back(p.bubble);
+    out.insert(out.end(), p.plat, p.plat + 10);
+    out.insert(out.end(), p.coll, p.coll + 10);
+    out.insert(out.end(), p.ham, p.ham + 16);
+    putU32(out, p.idle);
+    putU32(out, p.edge);
+    putU32(out, p.still);
+    putU32(out, p.startHeld);
+    putU16(out, p.prevRaw);
+    out.push_back(p.lastIc);
+    out.push_back(p.lastInj);
+    out.insert(out.end(), p.stood, p.stood + 5);
+    out.push_back((uint8_t)p.stoodOk);
+    putU32(out, (uint32_t)p.sceneStuck);
+    putU32(out, (uint32_t)p.sceneLastX);
+    putU32(out, (uint32_t)p.sceneHop);
+    putU16(out, p.tileBase);
+    putU16(out, p.tileWords);
+    for (uint16_t v : p.tiles) putU16(out, v);
   }
-  for (uint16_t v : p2Tiles_) {
-    out.push_back((uint8_t)v);
-    out.push_back((uint8_t)(v >> 8));
-  }
-  // (each controller's idle frames: resting, see holdScroll; after the rest, older states lack them)
-  for (uint32_t v : idle_)
-    for (int k = 0; k < 4; k++) out.push_back((uint8_t)(v >> (8 * k)));
+  out.insert(out.end(), platId_, platId_ + 10);
+  // (the rest of what the frames' turns go on from: online play's machines
+  // and a state's replay the same as the frames played through)
+  for (int v : {doorWait_, doorX_, vicStill_, vicLastMe_, stoodArea_, lastMe_}) putU32(out, (uint32_t)v);
+  out.push_back(menuHeld2_);
+  out.push_back((uint8_t)((int)prevStart2_ | vicStarted_ << 1));
   // (a death's tune and the music after it: the sound chip as it was before the tune, while it plays)
   out.push_back((uint8_t)deathTune_);
-  for (int k = 0; k < 4; k++) out.push_back((uint8_t)((uint32_t)musicBack_ >> (8 * k)));
+  putU32(out, (uint32_t)musicBack_);
   out.push_back(musicTrack_);
   out.push_back(lastTrack_);
   const uint32_t snap = musicBack_ > 0 ? (uint32_t)apuSnap_.size() : 0;
-  for (int k = 0; k < 4; k++) out.push_back((uint8_t)(snap >> (8 * k)));
+  putU32(out, snap);
   out.insert(out.end(), apuSnap_.begin(), apuSnap_.begin() + snap);
 }
+
 
 // The title's third choice, CO-OP GAME, on the free row under the game's two
 // (Super Mario Bros.: 1 PLAYER GAME / 2 PLAYER GAME; The Lost Levels: MARIO
@@ -722,8 +930,17 @@ bool Smb1Engine::titleExec(uint32_t pc) {
   uint8_t* w = snes_.wram;
   if (pc == livesSet_) {
     // (a co-op game, as its start is picked on the title or for a continue:
-    // lives for two, at least 10 (the save's count if more))
-    if ((titleShown_ ? titleCursor_ == 2 : coop_) && w[0x075A] < 9) w[0x075A] = 9;
+    // a shared pool of 5 lives a player in it, at least 10 (the save's count
+    // if more); those who drop in later bring 5 more, see coopJoin)
+    if (titleShown_ ? titleCursor_ == 2 : coop_) {
+      int n = 0;
+      for (CoopPl& p : pl_) {
+        n += p.in || &p - pl_ < 2;
+        p.granted = p.in || &p - pl_ < 2;
+      }
+      const int want = std::min(5 * n - 1, 98);
+      if (w[0x075A] < want) w[0x075A] = (uint8_t)want;
+    }
     return false;
   }
   const TitleLayout& L = lostLevels_ ? kTitleLl : kTitleSmb1;
@@ -881,110 +1098,209 @@ void Smb1Engine::hudFrame() {
   for (int i = 0; i < 13; i++) name[i] = text[i] || i == 6 ? (uint16_t)(kHudAttr | text[i]) : kHudBlank;
 }
 
+
 void Smb1Engine::coopLoad(const uint8_t* p, size_t n) {
   boxAfterSwap_ = false;
-  restWait_ = false;
-  if (!coopOk_ || p2_.empty()) return;
+  if (!coopOk_ || pl_[0].v.empty()) return;
+  uint8_t* w = snes_.wram;
   // (where the game's player is now: from wherever the state came, not a
-  // move of the game's (see coopAfter_: Luigi was put back beside Mario))
-  lastMe_ = snes_.wram[0x0078] * 256 + snes_.wram[0x0219];
-  vicStarted_ = snes_.wram[0x0770] == 2;  // (a state from the victory scene: in it, not starting it again)
-  // (States from before [JumpspringForce] joined the variables: one fewer,
-  // the rest in order; and from before the last kVarsAdded: those 0.)
-  const int spring = varIndex(0x06DB);
-  const int count = p && n > 3 ? p[3] : 0;
-  const bool older = count == kVarCount - kVarsAdded - 1;
-  const int have = older ? count + 1 : count;  // (of the variables in order; those after it 0)
-  const size_t need = 4 + count + 12 + 4 + 4 + 512;
-  if (!p || n < need || p[0] != 'C' || p[1] != 1 ||
-      (count != kVarCount && count != kVarCount - kVarsAdded + kVarsAddedFirst && have != kVarCount - kVarsAdded))
-    return;
-  const uint8_t flags = p[2];
-  p2Valid_ = flags & 1;
-  p2Out_ = flags & 2;
-  p2Known_ = flags & 4;
-  luigiLive_ = flags & 8;
-  p2Drawn_ = flags & 16;
-  liveCtrl_ = flags & 32;
-  p2Wait_ = flags & 64;
-  const uint8_t* q = p + 4;
-  for (int i = 0, k = 0; i < kVarCount; i++)
-    p2_[i] = (older && i == spring) || i >= have ? 0 : q[k++];
-  q += count;
-  for (int& v : p2Box_) {
-    v = (int)(q[0] | q[1] << 8 | q[2] << 16 | (uint32_t)q[3] << 24);
-    q += 4;
-  }
-  std::copy(q, q + 3, p2Buttons_);
-  q += 3;
-  p2PrevAB_ = *q++;
-  p2TileBase_ = (uint16_t)(q[0] | q[1] << 8);
-  p2TileWords_ = (uint16_t)(q[2] | q[3] << 8);
-  q += 4;
-  for (uint16_t& v : p2Tiles_) {
-    v = (uint16_t)(q[0] | q[1] << 8);
+  // move of the game's (see coopAfter_: the others were put back beside him))
+  lastMe_ = w[0x0078] * 256 + w[0x0219];
+  vicStarted_ = w[0x0770] == 2;  // (a state from the victory scene: in it, not starting it again)
+  // (Nothing of a frame's turns carries over a state; what isn't kept starts
+  // the same on every machine that loads it: online play's lockstep.)
+  cur_ = -1;
+  doorWait_ = doorX_ = 0;
+  vicStill_ = vicLastMe_ = 0;
+  stoodArea_ = -1;
+  sceneFrame_ = 0;
+  menuHeld2_ = 0xff;
+  menuPress2_ = 0;
+  prevStart2_ = true;
+  start2_ = false;
+  deathTune_ = false;
+  musicBack_ = 0;
+  apuSnap_.clear();
+  lastApu_ = snes_.apu.saveState();  // (the same on every machine that loads it)
+  lastTrack_ = w[0x1606];
+  coopReset();  // (as a state without the block: P1 and P2 in, beside the game's player)
+  auto left = [&](const uint8_t* q, size_t k) { return (size_t)(q - p) + k <= n; };
+  auto u16 = [](const uint8_t*& q) {
+    uint16_t v = (uint16_t)(q[0] | q[1] << 8);
     q += 2;
-  }
-  auto left = [&](size_t k) { return (size_t)(q - p) + k <= n; };
-  auto u32 = [&]() {
+    return v;
+  };
+  auto u32 = [](const uint8_t*& q) {
     uint32_t v = (uint32_t)(q[0] | q[1] << 8 | q[2] << 16 | (uint32_t)q[3] << 24);
     q += 4;
     return v;
   };
-  for (int k = 0; k < 2; k++) {
-    idle_[k] = left(4) ? u32() : 1u << 20;  // (older states: as never touched)
-    still_[k] = std::min(idle_[k], 1u << 20);
-  }
-  stoodOk_[0] = stoodOk_[1] = false;
-  deathTune_ = false;
-  musicBack_ = 0;
-  apuSnap_.clear();
-  if (left(11)) {
+  auto music = [&](const uint8_t*& q) {
+    if (!left(q, 11)) return;
     deathTune_ = *q++ != 0;
-    musicBack_ = (int)std::min<uint32_t>(u32(), 1000);
+    musicBack_ = (int)std::min<uint32_t>(u32(q), 1000);
     musicTrack_ = *q++;
     lastTrack_ = *q++;
-    const uint32_t snap = u32();
-    if (left(snap)) {
+    const uint32_t snap = u32(q);
+    if (left(q, snap)) {
       apuSnap_.assign(q, q + snap);
       q += snap;
     }
+  };
+  bool v2 = false;
+  constexpr size_t kPlBytes =
+      1 + 1 + kVarCount + 12 + 3 + 1 + 1 + 10 + 10 + 16 + 4 + 4 + 4 + 4 + 2 + 1 + 1 + 5 + 1 + 12 + 2 + 2 + 512;
+  if (p && n >= 7 && p[0] == 'C' && p[1] == 2 && p[5] == kCoopMax && p[6] == kVarCount &&
+      n >= 7 + kCoopMax * kPlBytes + 10 + 24 + 2) {
+    const uint8_t* q = p + 2;
+    const uint8_t flags = *q++;
+    baseKnown_ = flags & 1;
+    luigiBase_ = flags & 2;
+    titleShown_ = flags & 4;
+    live_ = std::min<int>(*q++, kCoopMax - 1);
+    titleCursor_ = std::min<int>(*q++, 2);
+    q += 2;
+    for (CoopPl& c : pl_) {
+      const uint8_t f = *q++;
+      c.in = f & 1;
+      c.valid = f & 2;
+      c.out = f & 4;
+      c.wait = f & 8;
+      c.known = f & 16;
+      c.restWait = f & 32;
+      c.drawn = f & 64;
+      c.granted = f & 128;
+      c.colour = (int8_t)*q++;
+      if (c.colour >= characterVariantCount()) c.colour = -1;
+      std::copy(q, q + kVarCount, c.v.begin());
+      q += kVarCount;
+      for (int& v : c.box) v = (int)u32(q);
+      std::copy(q, q + 3, c.buttons);
+      q += 3;
+      c.prevAB = *q++;
+      c.bubble = *q++;
+      std::copy(q, q + 10, c.plat);
+      q += 10;
+      std::copy(q, q + 10, c.coll);
+      q += 10;
+      std::copy(q, q + 16, c.ham);
+      q += 16;
+      c.idle = u32(q);
+      c.edge = u32(q);
+      c.still = u32(q);
+      c.startHeld = u32(q);
+      c.prevRaw = u16(q);
+      c.lastIc = *q++;
+      c.lastInj = *q++;
+      std::copy(q, q + 5, c.stood);
+      q += 5;
+      c.stoodOk = *q++ != 0;
+      c.sceneStuck = (int)u32(q);
+      c.sceneLastX = (int)u32(q);
+      c.sceneHop = (int)u32(q);
+      c.tileBase = u16(q);
+      c.tileWords = std::min<uint16_t>(u16(q), 256);
+      for (uint16_t& v : c.tiles) v = u16(q);
+    }
+    pl_[0].in = true;
+    pl_[live_].in = true;
+    std::copy(q, q + 10, platId_);
+    q += 10;
+    for (int* v : {&doorWait_, &doorX_, &vicStill_, &vicLastMe_, &stoodArea_, &lastMe_}) *v = (int)u32(q);
+    menuHeld2_ = *q++;
+    prevStart2_ = *q & 1;
+    vicStarted_ = *q++ & 2;
+    music(q);
+    v2 = true;
+  } else if (p && n > 3 && p[0] == 'C' && p[1] == 1) {
+    // (two players: the kept-aside one's variables, then how he stands. States
+    // from before [JumpspringForce] joined the variables: one fewer, the rest
+    // in order; and from before the last kVarsAdded: those 0.)
+    const int spring = varIndex(0x06DB);
+    const int count = p[3];
+    const bool older = count == kVarCount - kVarsAdded - 1;
+    const int have = older ? count + 1 : count;  // (of the variables in order; those after it 0)
+    const size_t need = 4 + count + 12 + 4 + 4 + 512;
+    if (n >= need &&
+        (count == kVarCount || count == kVarCount - kVarsAdded + kVarsAddedFirst || have == kVarCount - kVarsAdded)) {
+      const uint8_t flags = p[2];
+      const bool luigiLive = flags & 8;
+      live_ = (flags & 32) ? 1 : 0;
+      CoopPl& c = pl_[1 - live_];
+      c.valid = flags & 1;
+      c.out = flags & 2;
+      c.known = flags & 4;
+      c.drawn = flags & 16;
+      c.wait = flags & 64;
+      baseKnown_ = c.known;
+      luigiBase_ = ((live_ & 1) != 0) != luigiLive;
+      const uint8_t* q = p + 4;
+      for (int i = 0, k = 0; i < kVarCount; i++) c.v[i] = (older && i == spring) || i >= have ? 0 : q[k++];
+      q += count;
+      for (int& v : c.box) v = (int)u32(q);
+      std::copy(q, q + 3, c.buttons);
+      q += 3;
+      c.prevAB = *q++;
+      c.tileBase = u16(q);
+      c.tileWords = std::min<uint16_t>(u16(q), 256);
+      for (uint16_t& v : c.tiles) v = u16(q);
+      // (each controller's idle frames: resting, see holdScroll; after the rest, older states lack them)
+      for (int k = 0; k < 2; k++) pl_[k].idle = left(q, 4) ? u32(q) : 1u << 20;
+      music(q);
+    }
   }
-  for (int k = 0; k < 10; k++) {
-    p2Plat_[k] = 0xff;
-    p2Coll_[k] = 0;
-  }
-  std::fill(std::begin(p2Ham_), std::end(p2Ham_), 0);
-  // (Whose entries hold whom, as the state's frame drew them: his colours
+  if (!v2)
+    for (CoopPl& c : pl_) {
+      c.still = std::min(c.idle, 1u << 20);
+      c.lastInj = c.v[varIndex(0x07AE)];  // (as last seen: the state's, not the frame's before the load)
+      c.lastIc = w[0x0787];
+    }
+  // (Whose entries hold whom, as the state's frame drew them: their colours
   // from the first frame shown, each step of a rewind being one. Else the
-  // last frame's before the load were compared, and both were Mario's.)
-  saveSprites(0, snes_.wram[0x0B45]);
-  saveSprites(1, kP2Oam);
-  // (as last seen: the state's, not the frame's before the load)
-  lastInterval_ = snes_.wram[0x0787];
-  lastP2Inj_ = p2_[varIndex(0x07AE)];
+  // last frame's before the load were compared, and all were the game's.)
+  drawPass_++;
+  passOpen_ = false;
+  saveSprites(live_, w[0x0B45]);
+  liveDrawn_ = live_;
+  b0Owner_ = -1;
+  for (int id = 0; id < kCoopMax; id++)
+    if (id != live_ && pl_[id].in && pl_[id].drawn) b0Owner_ = id;
+  if (b0Owner_ >= 0) saveSprites(b0Owner_, kP2Oam);
+  shownPass_ = drawPass_;
+  coopLatch();
 }
 
-// A player's 8 sprites as just drawn (p: 0 the game's player, 1 the other),
-// to put back if another object's drawn over them (see coopPack_).
-void Smb1Engine::saveSprites(int p, uint8_t offset) {
+// A player's 8 sprites as just drawn, to put back if another object's drawn
+// over them (see coopPack_).
+void Smb1Engine::saveSprites(int id, uint8_t offset) {
   const uint8_t* w = snes_.wram;
-  sprBase_[p] = offset / 4;
-  sprFrame_[p] = snes_.frameCount();
+  CoopPl& p = pl_[id];
+  const int base = offset / 4;
+  p.sprPass = drawPass_;
   for (int k = 0; k < 8; k++) {
-    const int s = sprBase_[p] + k;
-    std::copy(w + 0x0800 + 4 * s, w + 0x0804 + 4 * s, sprSave_[p][k]);
-    sprHi_[p][k] = w[0x0C00 + 4 * s];
-    sprX_[p][k] = oamX_[s];
-    sprXSet_[p][k] = oamXSet_[s];
+    const int s = base + k;
+    std::copy(w + 0x0800 + 4 * s, w + 0x0804 + 4 * s, p.spr[k]);
+    p.sprHi[k] = w[0x0C00 + 4 * s];
+    p.sprX[k] = oamX_[s];
+    p.sprXSet[k] = oamXSet_[s];
+    p.sprAt[k] = s;
   }
+}
+
+// The next of a hook's turns still in play (-1: none left).
+int Smb1Engine::nextTurn(TurnList& t) const {
+  while (t.i < t.n) {
+    const int id = t.id[t.i++];
+    if (inPlay(id)) return id;
+  }
+  return -1;
 }
 
 // Objects that meet the player in their own routines, not through
 // PlayerEnemyCollision: lifts ($24-$2C: a lift moves its rider, then finds
 // who stands on it, [PlatformCollisionFlag] $03A2,X), the jumpspring ($32:
 // it compresses under its rider and throws him up) and firebars ($1B-$1F).
-// Each one's routine runs again for the other player, from the world as it
+// Each one's routine runs again for each other player, from the world as it
 // was before its first run, his variables in; the world then goes back to
 // how the first run left it, but for him (Luigi fell through lifts, stuck on
 // springs, walked through firebars). If only he rides the lift or the
@@ -999,11 +1315,13 @@ void Smb1Engine::coopObjBefore(int x) {
   coopObjPhase_ = 0;
   if (x >= 10) return;
   const uint8_t id = w[0x1C + x];
-  if (!w[0x10 + x] || id != p2PlatId_[x]) {
-    p2Plat_[x] = 0xff;
-    p2PlatId_[x] = id;
+  if (!w[0x10 + x] || id != platId_[x]) {
+    for (CoopPl& p : pl_) p.plat[x] = 0xff;
+    platId_[x] = id;
   }
-  if (!coop_ || !p2Valid_ || p2Out_ || p2Wait_ || w[0x000F] != 8 || !w[0x10 + x] || !rerunObject(id)) return;
+  if (!coop_ || w[0x000F] != 8 || !w[0x10 + x] || !rerunObject(id)) return;
+  int o[kCoopMax];
+  if (!listOthers(o)) return;
   std::copy(w, w + 0x2000, objBefore_.begin());
   coopObjSlot_ = x;
   coopObjPhase_ = 1;
@@ -1016,46 +1334,75 @@ void Smb1Engine::restoreLowRam(const std::vector<uint8_t>& from) {
   std::copy(from.begin() + 0x200, from.end(), w + 0x200);
 }
 
+// The object's run for the next other player (false: none left).
+bool Smb1Engine::objRun() {
+  CpuRegs& r = snes_.cpu.r;
+  uint8_t* w = snes_.wram;
+  const int who = nextTurn(objT_);
+  if (who < 0) return false;
+  const int x = coopObjSlot_;
+  CoopPl& p = pl_[who];
+  restoreLowRam(objBefore_);
+  swapPlayers(who, p1Hold_);
+  objAB_ = p.v[varIndex(0x000D)];
+  w[0x000D] = p.prevAB;  // (his A and B as the game has them at this point: a spring's high bounce)
+  for (int i = 0; i < 3; i++) w[0x000A + i] = p.buttons[i];
+  objP2Flag_ = p.plat[x];
+  objP2Spring_ = p.v[varIndex(0x070E)];
+  if (w[0x1C + x] >= 0x24 && w[0x1C + x] <= 0x2C) w[0x03A2 + x] = p.plat[x];
+  // JSR EnemiesAndLoopsCore again, returning here
+  auto push = [&](uint8_t v) {
+    w[r.sp & 0x1fff] = v;
+    r.sp = r.e ? (uint16_t)(0x100 | ((r.sp - 1) & 0xff)) : (uint16_t)(r.sp - 1);
+  };
+  const uint16_t ret = (uint16_t)(enemyRet_ - 1);
+  push(ret >> 8);
+  push(ret & 0xff);
+  r.x = (uint16_t)x;
+  w[0x009E] = (uint8_t)x;
+  r.pc = (uint16_t)(snes_.peek(enemyCall_ + 1) | snes_.peek(enemyCall_ + 2) << 8);
+  coopObjPhase_ = 2;
+  return true;
+}
+
 bool Smb1Engine::coopObjAfter() {
   CpuRegs& r = snes_.cpu.r;
   uint8_t* w = snes_.wram;
   const int x = coopObjSlot_;
+  auto finish = [&]() {
+    restoreLowRam(objWorld_);
+    r.a = coopRegs_[0];
+    r.x = coopRegs_[1];
+    r.y = coopRegs_[2];
+    // (killed by it: a life, once the world is back as it goes on)
+    for (int id = 0; id < kCoopMax; id++)
+      if (objDead_ >> id & 1) p2Lose(id);
+    objDead_ = 0;
+    return false;
+  };
   if (coopObjPhase_ == 1) {
     coopObjPhase_ = 0;
     if (w[0x000F] != 8) return false;  // (it hurt the game's player: the world's frozen for him)
     std::copy(w, w + 0x2000, objAfter_.begin());
-    restoreLowRam(objBefore_);
-    swapPlayers(p1Hold_);
-    objAB_ = p2_[varIndex(0x000D)];
-    w[0x000D] = p2PrevAB_;  // (his A and B as the game has them at this point: a spring's high bounce)
-    for (int i = 0; i < 3; i++) w[0x000A + i] = p2Buttons_[i];
-    objP2Flag_ = p2Plat_[x];
-    objP2Spring_ = p2_[varIndex(0x070E)];
-    if (w[0x1C + x] >= 0x24 && w[0x1C + x] <= 0x2C) w[0x03A2 + x] = p2Plat_[x];
+    objWorld_ = objAfter_;
+    objDead_ = 0;
+    objT_.n = listOthers(objT_.id);
+    objT_.i = 0;
     coopRegs_[0] = r.a;
     coopRegs_[1] = r.x;
     coopRegs_[2] = r.y;
-    // JSR EnemiesAndLoopsCore again, returning here
-    auto push = [&](uint8_t v) {
-      w[r.sp & 0x1fff] = v;
-      r.sp = r.e ? (uint16_t)(0x100 | ((r.sp - 1) & 0xff)) : (uint16_t)(r.sp - 1);
-    };
-    const uint16_t ret = (uint16_t)(enemyRet_ - 1);
-    push(ret >> 8);
-    push(ret & 0xff);
-    r.x = (uint16_t)x;
-    w[0x009E] = (uint8_t)x;
-    r.pc = (uint16_t)(snes_.peek(enemyCall_ + 1) | snes_.peek(enemyCall_ + 2) << 8);
-    coopObjPhase_ = 2;
-    return true;
+    if (objRun()) return true;
+    return finish();
   }
   if (coopObjPhase_ != 2) return false;
   coopObjPhase_ = 0;
+  const int who = cur_;
+  CoopPl& p = pl_[who];
   const uint8_t id = w[0x1C + x], task = w[0x000F];
   const bool lift = id >= 0x24 && id <= 0x2C;
-  if (lift) p2Plat_[x] = w[0x03A2 + x];
+  if (lift) p.plat[x] = w[0x03A2 + x];
   restorePlayer1(p1Hold_);
-  p2_[varIndex(0x000D)] = objAB_;
+  p.v[varIndex(0x000D)] = objAB_;
   const bool his = lift ? !onLift(id, objBefore_[0x03A2 + x]) && onLift(id, objP2Flag_)
                         : id == 0x32 && !objBefore_[0x070E] && objP2Spring_;
   if (his) {
@@ -1065,26 +1412,22 @@ bool Smb1Engine::coopObjAfter() {
     for (uint16_t a : kKeep) w[a] = objAfter_[a];
     if (lift) w[0x03A2 + x] = objAfter_[0x03A2 + x];
     std::copy(objAfter_.begin() + 0x11E0, objAfter_.begin() + 0x1200, w + 0x11E0);
+    std::copy(w, w + 0x2000, objWorld_.begin());
   } else {
     for (int a = 0x1600; a < 0x1604; a++)  // (his sounds: a firebar's hit)
-      if (w[a] && w[a] != objAfter_[a]) objAfter_[a] = w[a];
-    restoreLowRam(objAfter_);
+      if (w[a] && w[a] != objWorld_[a]) objWorld_[a] = w[a];
   }
-  r.a = coopRegs_[0];
-  r.x = coopRegs_[1];
-  r.y = coopRegs_[2];
   if (task != 8) {  // (hurt: smaller, blinking, as from an enemy; or killed)
-    p2_[varIndex(0x0754)] = p2_[varIndex(0x0756)] ? 0 : 1;
-    p2_[varIndex(0x070B)] = 0;
-    if (task == 0x0B) p2Lose();
+    p.v[varIndex(0x0754)] = p.v[varIndex(0x0756)] ? 0 : 1;
+    p.v[varIndex(0x070B)] = 0;
+    if (task == 0x0B) objDead_ |= 1 << who;
   }
-  return false;
+  if (objRun()) return true;
+  return finish();
 }
 
-// Game over with the other character the game's player (The Lost Levels):
-// back to the one the game was started with, whose game the continue is
-// (it went on as a Luigi game from a Mario one).
 void Smb1Engine::coopFrame() {
+  uint8_t* w = snes_.wram;
   const bool s2 = snes_.input[1] & kPadStart;  // (the second controller's Start, newly pressed: see coopEndStart_)
   {  // (... and all its buttons newly pressed, as $0FF6 has the first's: see coopMenu_)
     const uint8_t hi = (uint8_t)(snes_.input[1] >> 8);
@@ -1097,141 +1440,421 @@ void Smb1Engine::coopFrame() {
   // Super Mario Bros.' ending (8-4's victory: the portrait, the thanks) is
   // [CurrentPlayer]'s, which co-op leaves Mario: Luigi's when he took the axe.
   if (!lostLevels_) {
-    const bool ending = coop_ && ram(0x0770) == 2 && ram(0x075F) == 7 && luigiLive_;
+    const bool ending = coop_ && ram(0x0770) == 2 && ram(0x075F) == 7 && isLuigi(live_);
     if (ending) {
-      snes_.wram[0x0753] = 1;
+      w[0x0753] = 1;
       endingLuigi_ = true;
     } else if (endingLuigi_) {
-      snes_.wram[0x0753] = 0;
+      w[0x0753] = 0;
       endingLuigi_ = false;
     }
   }
-  if (coop_ && lostLevels_ && liveCtrl_ && ram(0x0770) == 3 && !p2_.empty()) swapRoles();
-  // (the player kept aside hit: his injury timer starts)
-  if (coop_ && !p2_.empty()) {
-    const uint8_t inj = p2_[varIndex(0x07AE)];
-    if (p2Valid_ && inj && !lastP2Inj_) p2Hurts_++;
-    lastP2Inj_ = inj;
+  // Game over with another the game's player (The Lost Levels): back to P1,
+  // whose game the continue is (it went on as a Luigi game from a Mario one).
+  if (coop_ && lostLevels_ && live_ != 0 && ram(0x0770) == 3) swapRoles(0);
+  // (a player kept aside hit: his injury timer starts)
+  if (coop_)
+    for (int id = 0; id < kCoopMax; id++) {
+      CoopPl& p = pl_[id];
+      if (id == live_ || p.v.empty()) continue;
+      const uint8_t inj = p.v[varIndex(0x07AE)];
+      if (p.in && p.valid && inj && !p.lastInj) p2Hurts_++;
+      p.lastInj = inj;
+    }
+  // Dropping in and out: Start on P2-P5's controllers (not read by the game
+  // in a 1-player game) joins in play; held 2 s, leaves (or gone from an
+  // online session). Select in play: the next colour (each machine shows the
+  // same: it's in the input). Never mid-turn (a frame the game overran).
+  const bool midTurn = coopMidTurn();
+  const bool play = ram(0x0770) == 1, paused = ram(0x0776) & 1;
+  for (int id = 0; id < kCoopMax; id++) {
+    CoopPl& p = pl_[id];
+    const uint16_t raw = rawPad(id), pressed = raw & ~p.prevRaw;
+    p.prevRaw = raw;
+    if (!coop_ || midTurn) continue;
+    if (p.in && play && !paused && (pressed & kPadSelect))
+      p.colour = (variantOf(id) + 1) % characterVariantCount();
+    if (id == 0) continue;
+    const bool present = (padsPresent_ >> id) & 1;
+    // (the game's player hands over to another in play only, under control)
+    const bool safe = id != live_ || (play && w[0x000F] == 8);
+    if (p.in) {
+      p.startHeld = (raw & kPadStart) ? p.startHeld + 1 : 0;
+      if ((!present || p.startHeld >= 120) && safe) coopLeave(id);
+    } else if (present && play && (pressed & kPadStart)) {
+      coopJoin(id);
+    }
   }
 }
 
-// The kept-aside player's timers, when the game's run: [IntervalTimerControl]
+// The kept-aside players' timers, when the game's run: [IntervalTimerControl]
 // $0787 counted down this frame; the slower ones as it starts over, at $14.
-void Smb1Engine::p2Timers() {
+void Smb1Engine::p2Timers(int id) {
+  CoopPl& p = pl_[id];
   const uint8_t ic = snes_.wram[0x0787];
-  if (ic != lastInterval_) {
+  if (ic != p.lastIc) {
+    std::vector<uint8_t>& v = p.v;
     for (uint16_t a : kFrameTimers)
-      if (p2_[varIndex(a)]) p2_[varIndex(a)]--;
+      if (v[varIndex(a)]) v[varIndex(a)]--;
     if (ic == 0x14)
       for (uint16_t a : kIntervalTimers)
-        if (p2_[varIndex(a)]) p2_[varIndex(a)]--;
+        if (v[varIndex(a)]) v[varIndex(a)]--;
   }
-  lastInterval_ = ic;
+  p.lastIc = ic;
 }
 
-// The screen held for the leader: the other (at x, on controller pad) is at
-// its left edge and playing (not left idle a few seconds: then he's pushed
-// along, as before).
-bool Smb1Engine::holdScroll(int x, int pad) const {
-  // (left idle, he's brought to the other once the other stands, see
-  // coopBringIdle: till then the screen waits too, not pushing him on)
-  // (or where he last stood, still ahead: see coopBringIdle)
-  const int k = pad == (liveCtrl_ ? 1 : 0) ? 1 : 0;
-  const bool other = coopStands(k == 1) ||
-                     (stoodOk_[k] && stoodAt_[k][0] * 256 + stoodAt_[k][1] >= playerLeftLimit() + 24);
-  return x <= playerLeftLimit() + 4 && (idle_[pad] < 180 || !other);
+// The screen held for the one in front: another (at x) is at its left edge
+// and playing (not left idle a few seconds, nor held there kEdgeWait: then
+// he's brought along, see coopBringIdle).
+bool Smb1Engine::holdScroll(int x, int id) const {
+  // (left behind, he's brought to the one in front once that one stands: till
+  // then the screen waits too, not pushing him on; or where that one last
+  // stood, still ahead)
+  const CoopPl& L = pl_[lead_];
+  const bool other =
+      coopStands(lead_) || (L.stoodOk && L.stood[0] * 256 + L.stood[1] >= playerLeftLimit() + 24);
+  const CoopPl& p = pl_[id];
+  return x <= playerLeftLimit() + 4 && ((p.idle < 180 && p.edge < kEdgeWait) || !other);
 }
 
-// Somewhere to bring one left idle to: the game's player (or Luigi, p2) on
-// his feet on the screen, or anywhere on it in water ([SwimmingFlag] $0704:
-// a swimmer never lands, and the screen waited for him for good). (The idle
-// count isn't restarted by being brought along: it was, and each time the
-// screen waited 3 s at its right edge for him again.)
-bool Smb1Engine::coopStands(bool p2) const {
-  if (p2 && p2_.empty()) return false;
-  auto v = [&](uint16_t a) { return p2 ? p2_[varIndex(a)] : ram(a); };
-  if (v(0x00BB) != 1) return false;
-  return v(0x0028) == 0 || (ram(0x0704) != 0 && v(0x0028) <= 2);
+// Anyone in play but `except` held at the screen's left edge (see holdScroll).
+bool Smb1Engine::anyHeld(int except) const {
+  for (int id = 0; id < kCoopMax; id++)
+    if (id != except && (id == live_ || inPlay(id)) && holdScroll(xOf(id), id)) return true;
+  return false;
+}
+
+// The one furthest right (the game's player on a tie): he moves the screen.
+int Smb1Engine::leader() const {
+  int best = live_;
+  for (int id = 0; id < kCoopMax; id++)
+    if (inPlay(id) && xOf(id) > xOf(best)) best = id;
+  return best;
+}
+
+// Somewhere to bring one left behind to: a player on his feet on the screen,
+// or anywhere on it in water ([SwimmingFlag] $0704: a swimmer never lands, and
+// the screen waited for him for good). (The idle count isn't restarted by
+// being brought along: it was, and each time the screen waited 3 s at its
+// right edge for him again.)
+bool Smb1Engine::coopStands(int id) const {
+  if (id != live_ && pl_[id].v.empty()) return false;
+  if (gv(id, 0x00BB) != 1) return false;
+  return gv(id, 0x0028) == 0 || (ram(0x0704) != 0 && gv(id, 0x0028) <= 2);
+}
+
+namespace {
+// (a JSR's return address onto the stack, as the CPU pushes it)
+void pushRet(Snes& s, uint32_t to) {
+  CpuRegs& r = s.cpu.r;
+  auto push = [&](uint8_t v) {
+    s.wram[r.sp & 0x1fff] = v;
+    r.sp = r.e ? (uint16_t)(0x100 | ((r.sp - 1) & 0xff)) : (uint16_t)(r.sp - 1);
+  };
+  const uint16_t ret = (uint16_t)(to - 1);
+  push(ret >> 8);
+  push(ret & 0xff);
+}
+// (the SNES controller as the game's SavedJoypad has it: B or A jumps, Y or X runs)
+uint8_t joypadBits(uint16_t p) {
+  return (uint8_t)(((p & (kPadB | kPadA)) ? 0x80 : 0) | ((p & (kPadY | kPadX)) ? 0x40 : 0) |
+                   ((p & kPadUp) ? 0x08 : 0) | ((p & kPadDown) ? 0x04 : 0) | ((p & kPadLeft) ? 0x02 : 0) |
+                   ((p & kPadRight) ? 0x01 : 0));
+}
+}  // namespace
+
+// The next other's turn under control: the game's player routine again, his
+// variables in, back at coopAfter_ (false: none left).
+bool Smb1Engine::moveNext() {
+  CpuRegs& r = snes_.cpu.r;
+  uint8_t* w = snes_.wram;
+  const int id = nextTurn(moveT_);
+  if (id < 0) return false;
+  p2Timers(id);
+  // (He moves the screen only if he is the one in front, and no one else is
+  // held at its left edge.)
+  const bool lead = id == lead_;
+  const bool hold = anyHeld(id);
+  swapPlayers(id, p1Hold_);
+  w[0x0FF4] = pl_[id].pad;  // (his controller, as the game reads them)
+  if (!lead || hold) w[0x0723] = 1;
+  coopEdge_ = !lead || hold;
+  coopMove_ = 1;
+  std::copy(w + 0x0830, w + 0x0840, dustHold_);
+  r.pc = (uint16_t)coopCall_;
+  return true;
+}
+
+// The next other's turn of a scene the game walks its player through (the
+// pipe intro, the flag, the walk into the castle), beside him: the game's
+// routine for it runs with his variables in; all else it changes (the timers,
+// the next area, the music, the screen) goes back after it: the game's
+// player's scene leads.
+bool Smb1Engine::sceneNext() {
+  CpuRegs& r = snes_.cpu.r;
+  uint8_t* w = snes_.wram;
+  while (moveT_.i < moveT_.n) {
+    const int id = moveT_.id[moveT_.i++];
+    CoopPl& p = pl_[id];
+    if (id == live_ || !p.in || p.out || p.wait) continue;
+    if (!p.valid) p2Sync(id);
+    if ((int8_t)p.v[varIndex(0x00BB)] >= 2) {  // (fell: out until the next area, no life lost)
+      p.valid = false;
+      p.out = true;
+      continue;
+    }
+    // (Into the castle: where the game's player stopped, out of sight, its
+    // door. In he goes too.)
+    const int me = ram(0x0078) * 256 + ram(0x0219);
+    if (doorWait_ > 8 && xOf(id) >= me - 4) {
+      p.valid = false;
+      p.out = true;
+      continue;
+    }
+    p2Timers(id);
+    std::copy(w, w + 0x2000, objBefore_.begin());
+    swapPlayers(id, p1Hold_);
+    w[0x0FF4] = 0;
+    w[0x0723] = 1;  // (the screen is the game's player's)
+    w[0x0480] |= 1;  // ([Player_CollisionBits]: a wall once bumped (the pole's foot) held him there for good)
+    coopMove_ = 2;
+    // (at the flag: down the pole if he's on it, else walking on to the
+    // castle: the game's walk itself (AutoControlPlayer), its end-of-level
+    // routine stops walking once the game's player is in)
+    const bool onPole = w[0x0028] == 3 && w[0x0237] < 0x9E;
+    const bool behind = w[0x0078] * 256 + w[0x0219] < me - 8;  // (ahead of him: he waits, by the door)
+    // (Luigi, kept aside, on the pole as the scene starts: he took it
+    // himself. Not once the scene's walk has hopped him onto it.)
+    if (onPole && isLuigi(id) && sceneNew_) luigiPoles_++;
+    if (sceneIntro_ || onPole || !coopWalk_) {
+      w[0x000F] = sceneIntro_ ? 7 : onPole ? 4 : 5;
+      r.pc = (uint16_t)coopCall_;
+      return true;
+    }
+    w[0x000F] = 5;
+    // (blocked on the ground, by the flagpole's foot or a step: a hop)
+    const int px = w[0x0078] * 256 + w[0x0219];
+    p.sceneStuck = (behind && px == p.sceneLastX && w[0x0028] == 0) ? p.sceneStuck + 1 : 0;
+    p.sceneLastX = px;
+    if (p.sceneStuck >= 4 && !p.sceneHop && behind) p.sceneHop = 12;
+    const uint8_t walk = p.sceneHop ? 0x81 : behind ? 0x01 : 0x00;
+    if (p.sceneHop) p.sceneHop--;
+    pushRet(snes_, coopAfter_);  // (JSR AutoControlPlayer with A = right, back to after the call)
+    r.a = (r.a & 0xff00) | walk;
+    r.pc = (uint16_t)coopWalk_;
+    return true;
+  }
+  return false;
+}
+
+// The next other's meeting with the enemies (false: none left).
+bool Smb1Engine::enemyStart() {
+  uint8_t* w = snes_.wram;
+  const int id = nextTurn(enemyT_);
+  if (id < 0) return false;
+  CoopPl& p = pl_[id];
+  swapPlayers(id, p1Hold_);
+  // (Each enemy's "touching the player" bit, his own: shared, Mario's not
+  // touching a shell Luigi had just kicked made it a new touch, and the
+  // moving shell hurt him.)
+  if (collBits_)
+    for (int k = 0; k < 10; k++) {
+      uint8_t& b = w[collBits_ + k];
+      if (!w[0x10 + k]) p.coll[k] = 0;
+      b = (uint8_t)((b & ~1) | p.coll[k]);
+    }
+  coopEnemy_ = 0;
+  return true;
+}
+
+bool Smb1Engine::whirlNext() {
+  CpuRegs& r = snes_.cpu.r;
+  const int id = nextTurn(whirlT_);
+  if (id < 0) return false;
+  swapPlayers(id, p1Hold_);
+  pushRet(snes_, coopWhirlRet_);
+  coopWhirlPhase_ = 1;
+  r.pc = (uint16_t)coopWhirl_;
+  return true;
+}
+
+// The hammer's meeting with the next other (back at its start, him in); none
+// left: the game's player's flag back, on to its RTS.
+bool Smb1Engine::hamNext() {
+  CpuRegs& r = snes_.cpu.r;
+  uint8_t* w = snes_.wram;
+  const int x = coopHamSlot_;
+  const int id = nextTurn(hamT_);
+  if (id >= 0) {
+    swapPlayers(id, p1Hold_);
+    w[hamFlag_ + x] = pl_[id].ham[x];
+    r.x = (uint16_t)x;
+    w[0x009E] = (uint8_t)x;
+    coopHamPhase_ = 2;
+    pushRet(snes_, coopHammer_);
+    return false;  // (the routine from its start)
+  }
+  w[hamFlag_ + x] = hamP1_;
+  coopHamPhase_ = 0;
+  r.a = coopRegs_[0];
+  r.x = coopRegs_[1];
+  r.y = coopRegs_[2];
+  r.pc = (uint16_t)coopHammerRts_;
+  return true;
+}
+
+// The victory scene's walk for the next other (see coopVicDraw_); none left:
+// the scene goes on.
+bool Smb1Engine::vicNext() {
+  CpuRegs& r = snes_.cpu.r;
+  uint8_t* w = snes_.wram;
+  const int id = nextTurn(vicT_);
+  if (id < 0) {
+    vicPhase_ = 0;
+    r.a = coopRegs_[0];
+    r.x = coopRegs_[1];
+    r.y = coopRegs_[2];
+    return false;
+  }
+  const int me = ram(0x0078) * 256 + ram(0x0219);
+  p2Timers(id);
+  std::copy(w, w + 0x2000, objBefore_.begin());
+  swapPlayers(id, p1Hold_);
+  w[0x0723] = 1;
+  vicPhase_ = 1;
+  pushRet(snes_, coopVicDraw_);
+  // (on to beside him, braking his skid short of him: off a ledge at a
+  // run he went over into the lava by the princess)
+  const int px = w[0x0078] * 256 + w[0x0219];
+  const uint8_t speed = w[0x005D];
+  // (Walked on only with ground ahead, a step down at most three tiles:
+  // in 8-4's last room he walked off the step into the lava; he waits,
+  // brought beside the game's player once that one stands, see coopVicDraw_.)
+  const int fy = w[0x0237];
+  bool ground = false;
+  for (int k = 1; k <= 3 && !ground; k++) ground = metatile(px + 24, fy + 20 + 16 * k) > 0;
+  const bool walk = px < me - 40 && (ground || metatile(px + 24, fy + 36) < 0);
+  r.a = (r.a & 0xff00) | (walk ? 0x01 : (speed && speed < 0x80 && px > me - 32) ? 0x02 : 0x00);
+  r.pc = (uint16_t)coopWalk_;
+  return true;
+}
+
+// The next other's drawing, into OAM entries 44-51 (each drawn there in
+// turn; all but the last moved to free entries once the frame's drawn, see
+// coopPack_). False: none left.
+bool Smb1Engine::drawNext() {
+  CpuRegs& r = snes_.cpu.r;
+  uint8_t* w = snes_.wram;
+  const int id = nextTurn(drawT_);
+  if (id < 0) return false;
+  if (b0Owner_ >= 0 && pl_[b0Owner_].sprPass == drawPass_)
+    for (int k = 0; k < 8; k++) w[0x0801 + kP2Oam + 4 * k] = 0xF8;  // (the last one's, kept: see saveSprites)
+  swapPlayers(id, p1Hold_);
+  // (His pose is chosen from his controller too: standing only with no
+  // left or right held. Mario's walking had him run on the spot.)
+  for (int i = 0; i < 3; i++) {
+    buttonHold_[i] = w[0x000A + i];
+    w[0x000A + i] = pl_[id].buttons[i];
+  }
+  coopP2OamClear();
+  coopDrawPhase_ = 1;
+  r.pc = (uint16_t)coopDraw_;
+  return true;
 }
 
 bool Smb1Engine::coopExec(uint32_t pc) {
   CpuRegs& r = snes_.cpu.r;
   uint8_t* w = snes_.wram;
+  auto saveRegs = [&]() {
+    coopRegs_[0] = r.a;
+    coopRegs_[1] = r.x;
+    coopRegs_[2] = r.y;
+  };
+  auto loadRegs = [&]() {
+    r.a = coopRegs_[0];
+    r.x = coopRegs_[1];
+    r.y = coopRegs_[2];
+  };
   if (pc == coopDeathSmall_) {
     // The game's player killed (small, hurt) after the enemies' run, by what
     // runs after it ($03:BAA2's objects: a cannon's Bullet Bill): that run's
-    // end (coopEnemyAt_) had passed, so nothing handed over to the other and
+    // end (coopEnemyAt_) had passed, so nothing handed over to another and
     // the level started over, the other playing (just back, blinking). As
-    // there: the other plays on, the dead one back beside him, a life; the
+    // there: another plays on, the dead one back beside him, a life; the
     // death skipped (the routine's end: nothing set yet).
-    if (!coop_ || !afterEnemies_ || coopMove_ == 1 || coopEnemy_ >= 0 || w[0x000F] != 8 || w[0x0759] != 0 ||
-        !p2Alive(false))
+    if (!coop_ || !afterEnemies_ || coopMove_ == 1 || coopEnemy_ >= 0 || cur_ >= 0 || w[0x000F] != 8 ||
+        w[0x0759] != 0)
       return false;
-    swapRoles();
-    p2Lose();
+    const int h = heir();
+    if (h < 0) return false;
+    const int dead = live_;
+    swapRoles(h);
+    p2Lose(dead);
     r.pc = (uint16_t)(coopDeathSmall_ - 3);
     return true;
   }
   if (pc == coopCall_) {
-    if (coopMove_ == 1) return false;  // (the other's call: on it goes)
+    if (coopMove_ == 1) return false;  // (another's call: on it goes)
     afterEnemies_ = false;
     for (int i = 0; i < kHitKeepCount; i++) preTurn_[i] = w[kHitKeep[i]];  // (a fall: see coopAfter_)
-    // (Each character on his own controller, whichever of them is the game's
-    // player: the first for the one the game was started with, the second
-    // for the one who joined him.)
-    pad1_ = w[0x0FF4];
-    pad2_ = w[0x0FF5];
-    if (lostLevels_) {
-      // (The Lost Levels, a 1-player game, doesn't read the second
-      // controller: here, as the game reads the first: B or A jumps, Y or X
-      // runs.)
-      const uint16_t p = snes_.input[1];
-      pad2_ = (uint8_t)(((p & (kPadB | kPadA)) ? 0x80 : 0) | ((p & (kPadY | kPadX)) ? 0x40 : 0) |
-                        ((p & kPadUp) ? 0x08 : 0) | ((p & kPadDown) ? 0x04 : 0) | ((p & kPadLeft) ? 0x02 : 0) |
-                        ((p & kPadRight) ? 0x01 : 0));
-      // (... and not where the game takes the controller away: out of play
-      // (the victory scene's walk: Luigi walked off into the pit, the ending
-      // lost), or where it reads the first as nothing though held)
-      const uint16_t q = snes_.input[0];
-      const uint8_t pad1 = (uint8_t)(((q & (kPadB | kPadA)) ? 0x80 : 0) | ((q & (kPadY | kPadX)) ? 0x40 : 0) |
-                                     ((q & kPadUp) ? 0x08 : 0) | ((q & kPadDown) ? 0x04 : 0) |
-                                     ((q & kPadLeft) ? 0x02 : 0) | ((q & kPadRight) ? 0x01 : 0));
-      if (w[0x0770] != 1 || (pad1 && !w[0x0FF4])) pad2_ = 0;
+    // (Each player on his own controller, whichever of them is the game's
+    // player. The Lost Levels, a 1-player game, doesn't read the second; nor
+    // does either game the third to fifth: here, as the game reads the first,
+    // and not where the game takes the controller away: out of play (the
+    // victory scene's walk: Luigi walked off into the pit, the ending lost),
+    // or where it reads the first as nothing though held.)
+    const bool gone = w[0x0770] != 1 || (joypadBits(snes_.input[0]) && !w[0x0FF4]);
+    pl_[0].pad = w[0x0FF4];
+    pl_[1].pad = lostLevels_ ? (gone ? 0 : joypadBits(snes_.input[1])) : w[0x0FF5];
+    for (int id = 2; id < kCoopMax; id++) pl_[id].pad = gone ? 0 : joypadBits(extPads_[id]);
+    if (coop_ && live_ != 0) w[0x0FF4] = pl_[live_].pad;
+    for (CoopPl& p : pl_) {
+      p.idle = p.pad ? 0 : p.idle + 1;
+      p.still = p.pad ? 0 : std::min(p.still + 1, 1u << 20);  // (kept when brought along)
     }
-    if (coop_ && liveCtrl_) w[0x0FF4] = pad2_;
-    // Mario's turn: he moves the screen only if he is the further right
-    // ([ScrollLock] set for his turn, unless the game has set it itself).
-    // (... nor while the other stands at the screen's left edge, still
-    // playing: the edge pushed him on, into pits)
-    for (int k = 0; k < 2; k++) {
-      idle_[k] = (k ? pad2_ : pad1_) ? 0 : idle_[k] + 1;
-      still_[k] = (k ? pad2_ : pad1_) ? 0 : std::min(still_[k] + 1, 1u << 20);  // (kept when brought along)
+    // (each one held at the screen's left edge with the one in front well on:
+    // how long, for the wait before he's brought along)
+    if (coop_) {
+      const int lead = leader(), left = playerLeftLimit();
+      for (int id = 0; id < kCoopMax; id++) {
+        CoopPl& p = pl_[id];
+        const bool here = id == live_ || inPlay(id);
+        const int x = here ? xOf(id) : 0;
+        p.edge = here && x <= left + 4 && xOf(lead) > x + 32 ? std::min(p.edge + 1, 1u << 20) : 0;
+      }
     }
     coopBringIdle();
     coopIdleSafe();
-    // (Who leads is settled once, here, for both turns: compared before and
-    // after Mario moved, a step apart each thought the other led, and the
-    // screen stood still.)
-    p2Leads_ = p2Valid_ && p2X() > ram(0x0078) * 256 + ram(0x0219);
-    lockForced_ = coop_ && p2Valid_ && !p2Wait_ && !p2Out_ && w[0x000F] == 8 && w[0x0723] == 0 &&
-                  (p2Leads_ || holdScroll(p2X(), liveCtrl_ ? 0 : 1));
+    // The game's player moves the screen only if he is the one in front
+    // ([ScrollLock] set for his turn, unless the game has set it itself),
+    // nor while another stands at the screen's left edge, still playing (the
+    // edge pushed him on, into pits). (Who leads is settled once, here, for
+    // all turns: compared before and after each moved, a step apart each
+    // thought the other led, and the screen stood still.)
+    lead_ = leader();
+    int o[kCoopMax];
+    const bool others = listOthers(o) > 0;
+    lockForced_ = coop_ && others && w[0x000F] == 8 && w[0x0723] == 0 && (lead_ != live_ || anyHeld(live_));
     if (lockForced_) w[0x0723] = 1;
     coopEdge_ = lockForced_;
     return false;
   }
   if (pc == coopAfter_) {
     if (coopMove_ == 2) {
-      // His turn of a scene over (see below): what he did stays his; the
+      // His turn of a scene over (see sceneNext): what he did stays his; the
       // world goes back to how the game's player's turn left it.
-      p2PrevAB_ = w[0x000D];
+      CoopPl& p = pl_[cur_];
+      p.prevAB = w[0x000D];
       w[0x000D] = w[0x000A];
-      for (int i = 0; i < 3; i++) p2Buttons_[i] = w[0x000A + i];
+      for (int i = 0; i < 3; i++) p.buttons[i] = w[0x000A + i];
       coopMove_ = 0;
       restorePlayer1(p1Hold_);
       restoreLowRam(objBefore_);
-      return false;
+      return sceneNext();
     }
-    if (coopMove_ == 1) {  // Luigi's turn over: Mario back
+    if (coopMove_ == 1) {  // another's turn over: the game's player back
+      const int id = cur_;
+      CoopPl& p = pl_[id];
       coopEdge_ = false;
       // (His skid's dust, drawn where the game's player's goes: to entries
       // 8-11 (no use of the game's), the game's player's back. His bubbles.)
@@ -1239,179 +1862,136 @@ bool Smb1Engine::coopExec(uint32_t pc) {
         std::copy(w + 0x0830, w + 0x0840, w + 0x0820);
         std::copy(dustHold_, dustHold_ + 16, w + 0x0830);
       }
-      coopBubble();
+      coopBubble(id);
       // (The game keeps this frame's A and B as the last frame's at the end
-      // of the frame, from Mario's: Luigi's here. A jump goes on while A is
-      // held in both; without it his were all hops.)
-      p2PrevAB_ = w[0x000D];  // (his last frame's, for a fireball: see coopFire_)
+      // of the frame, from the game's player's: his here. A jump goes on
+      // while A is held in both; without it his were all hops.)
+      p.prevAB = w[0x000D];  // (his last frame's, for a fireball: see coopFire_)
       w[0x000D] = w[0x000A];
-      for (int i = 0; i < 3; i++) p2Buttons_[i] = w[0x000A + i];  // (for his drawing: see below)
+      for (int i = 0; i < 3; i++) p.buttons[i] = w[0x000A + i];  // (for his drawing: see drawNext)
       coopMove_ = 0;
       const uint8_t task = w[0x000F];
       // (He took the axe: the victory scene is his (Toad thanks him, The
-      // Lost Levels' ending is his); the other walks along (see coopVicDraw_).)
+      // Lost Levels' ending is his); the others walk along (see coopVicDraw_).)
       const bool axe = w[0x0770] == 2;  // (his turn runs in play only: [OperMode] 1)
       if ((task >= 1 && task <= 4) || axe) {
         // He took a vine, a pipe or the flag: the game goes on with him (he
-        // goes down the pipe, the screen follows); the other comes along
+        // goes down the pipe, the screen follows); the others come along
         // after it. (He stays in; the one he swaps with is kept aside.)
         restorePlayer1(p1Hold_);
-        swapRoles();
+        swapRoles(id);
         // (the scene's own set-up stays: the task, the screen's lock, the
         // controller bits the frame reads)
         for (int i = 0; i < kKeepCount; i++)
           if (kKeep[i] != 0x000F && kKeep[i] != 0x0723 && kKeep[i] > 0x000C && kKeep[i] != 0x0E67)
             w[kKeep[i]] = keepHold_[i];
         for (int i = 0; i < kHitKeepCount; i++) preLoop_[i] = w[kHitKeep[i]];
+        moveT_.n = moveT_.i = 0;  // (no more turns: the scene is his)
         return false;
       }
       restorePlayer1(p1Hold_);
       for (int i = 0; i < kKeepCount; i++) w[kKeep[i]] = keepHold_[i];  // (the scroll lock too)
       for (int i = 0; i < kHitKeepCount; i++) preLoop_[i] = w[kHitKeep[i]];  // (see coopEnemyAt_)
-      return false;
+      return moveNext();
     }
     if (lockForced_) w[0x0723] = 0;
     lockForced_ = false;
     coopEdge_ = false;
     for (int i = 0; i < kHitKeepCount; i++) preLoop_[i] = w[kHitKeep[i]];
     if (!coop_) return false;
-    // Mario down a hole while Luigi plays on: back beside Luigi (a life),
-    // what the fall set up undone (the death music, the screen's lock). (Not
-    // from a cloud area: that fall takes him back to the level.)
-    // ([Player_Y_HighPos] signed, as the game reads it: $FF is above the screen, a spring's
-    // launch in The Lost Levels, not down a hole)
-    if ((int8_t)ram(0x00BB) >= 2 && w[0x000F] == 8 && !w[0x0743] && !w[0x0759] && p2Alive(false)) {
-      for (int i = 0; i < kHitKeepCount; i++) w[kHitKeep[i]] = preTurn_[i];
-      for (int i = 0; i < kHitKeepCount; i++) preLoop_[i] = w[kHitKeep[i]];
-      swapRoles();  // (the other plays on; the fallen one back beside him)
-      p2Lose();
+    // The game's player down a hole while others play on: back beside one of
+    // them (a life), what the fall set up undone (the death music, the
+    // screen's lock). (Not from a cloud area: that fall takes him back to the
+    // level.) ([Player_Y_HighPos] signed, as the game reads it: $FF is above
+    // the screen, a spring's launch in The Lost Levels, not down a hole)
+    if ((int8_t)ram(0x00BB) >= 2 && w[0x000F] == 8 && !w[0x0743] && !w[0x0759]) {
+      const int h = heir();
+      if (h >= 0) {
+        for (int i = 0; i < kHitKeepCount; i++) w[kHitKeep[i]] = preTurn_[i];
+        for (int i = 0; i < kHitKeepCount; i++) preLoop_[i] = w[kHitKeep[i]];
+        const int dead = live_;
+        swapRoles(h);  // (another plays on; the fallen one back beside him)
+        p2Lose(dead);
+      }
     }
-    // Luigi plays while Mario is under control; anything that moves on to
-    // another scene (a pipe, the flag, a death, the next area) brings him
-    // back beside Mario after it.
+    // The others play while the game's player is under control; anything that
+    // moves on to another scene (a pipe, the flag, a death, the next area)
+    // brings them back beside him after it.
     const uint8_t task = w[0x000F];
     const bool play = w[0x0770] == 1 && w[0x0772] == 3;
-    if (w[0x0770] == 2) return false;  // (he took the axe: the other stays for the victory scene, see coopVicDraw_)
+    if (w[0x0770] == 2) return false;  // (he took the axe: the others stay for the victory scene, see coopVicDraw_)
     // (The game moved its player a long way at once (a castle's wrong way
-    // round, 1024 px back): the other comes along, beside him.)
+    // round, 1024 px back): the others come along, beside him.)
     const int me0 = ram(0x0078) * 256 + ram(0x0219);
-    if (play && task == 8 && p2Valid_ && std::abs(me0 - lastMe_) >= 512) p2Valid_ = false;
+    if (play && task == 8 && std::abs(me0 - lastMe_) >= 512)
+      for (int id = 0; id < kCoopMax; id++)
+        if (id != live_) pl_[id].valid = false;
     lastMe_ = me0;
-    // The scenes the game walks its player through, he goes through beside
+    // The scenes the game walks its player through, they go through beside
     // him: the pipe intro ([PlayerEntranceCtrl] 6 or 7, not coming out of a
     // pipe: [AltEntranceControl] 2), the flag and the walk into the castle.
-    // The game's routine for it runs with his variables in; all else it
-    // changes (the timers, the next area, the music, the screen) goes back
-    // after it: the game's player's scene leads.
     const bool intro = task == 7 && (w[0x0710] == 6 || w[0x0710] == 7) && w[0x0752] != 2;
-    if (play && (intro || ((task == 4 || task == 5) && p2Valid_)) && !p2Out_ && !p2Wait_) {
-      if (!p2Valid_) p2Sync();
-      if ((int8_t)p2_[varIndex(0x00BB)] >= 2) {  // (fell: out until the next area, no life lost)
-        p2Valid_ = false;
-        p2Out_ = true;
-        return false;
-      }
-      // (Into the castle: where the game's player stopped, out of sight, its
-      // door. In he goes too.)
-      const int me = ram(0x0078) * 256 + ram(0x0219);
-      if (task == 5 && me == doorX_ && ram(0x00BB) == 1 && ram(0x0237) >= 0xAE) {
+    const bool scene = play && (intro || task == 4 || task == 5);
+    if (scene) {
+      if (task == 5 && me0 == doorX_ && ram(0x00BB) == 1 && ram(0x0237) >= 0xAE) {
         if (doorWait_ < 255) doorWait_++;
       } else {
         doorWait_ = 0;
       }
-      doorX_ = me;
-      if (doorWait_ > 8 && p2X() >= me - 4) {
-        p2Valid_ = false;
-        p2Out_ = true;
-        return false;
-      }
-      p2Timers();
-      std::copy(w, w + 0x2000, objBefore_.begin());
-      swapPlayers(p1Hold_);
-      w[0x0FF4] = 0;
-      w[0x0723] = 1;  // (the screen is the game's player's)
-      w[0x0480] |= 1;  // ([Player_CollisionBits]: a wall once bumped (the pole's foot) held him there for good)
-      coopMove_ = 2;
-      // (at the flag: down the pole if he's on it, else walking on to the
-      // castle: the game's walk itself (AutoControlPlayer), its end-of-level
-      // routine stops walking once the game's player is in)
-      const bool onPole = w[0x0028] == 3 && w[0x0237] < 0x9E;
-      const bool behind = w[0x0078] * 256 + w[0x0219] < me - 8;  // (ahead of him: he waits, by the door)
-      // (Luigi, kept aside, on the pole as the scene starts: he took it
-      // himself. Not once the scene's walk has hopped him onto it.)
+      doorX_ = me0;
       const uint32_t fc = snes_.frameCount();
-      if (onPole && !luigiLive_ && sceneFrame_ + 1 != fc) luigiPoles_++;
+      sceneNew_ = sceneFrame_ + 1 != fc;
       sceneFrame_ = fc;
-      if (intro || onPole || !coopWalk_) {
-        w[0x000F] = intro ? 7 : onPole ? 4 : 5;
-        r.pc = (uint16_t)coopCall_;
-        return true;
+      sceneIntro_ = intro;
+    }
+    moveT_.n = moveT_.i = 0;
+    for (int id = 0; id < kCoopMax; id++) {
+      CoopPl& p = pl_[id];
+      if (id == live_ || !p.in) continue;
+      if (scene && !p.out && !p.wait && (intro || p.valid)) {
+        moveT_.id[moveT_.n++] = id;
+      } else if (!play || task <= 7 || task == 0x0B) {
+        p.valid = false;
+        if (task <= 7) p.out = p.wait = false;  // (a new area or try: back in)
       }
-      w[0x000F] = 5;
-      // (blocked on the ground, by the flagpole's foot or a step: a hop)
-      const int px = w[0x0078] * 256 + w[0x0219];
-      sceneStuck_ = (behind && px == sceneLastX_ && w[0x0028] == 0) ? sceneStuck_ + 1 : 0;  // (told to walk, and not moving)
-      sceneLastX_ = px;
-      if (sceneStuck_ >= 4 && !sceneHop_ && behind) sceneHop_ = 12;
-      const uint8_t walk = sceneHop_ ? 0x81 : behind ? 0x01 : 0x00;
-      if (sceneHop_) sceneHop_--;
-      auto push = [&](uint8_t v) {
-        w[r.sp & 0x1fff] = v;
-        r.sp = r.e ? (uint16_t)(0x100 | ((r.sp - 1) & 0xff)) : (uint16_t)(r.sp - 1);
-      };
-      const uint16_t ret = (uint16_t)(coopAfter_ - 1);  // (JSR AutoControlPlayer with A = right, back to after the call)
-      push(ret >> 8);
-      push(ret & 0xff);
-      r.a = (r.a & 0xff00) | walk;
-      r.pc = (uint16_t)coopWalk_;
-      return true;
     }
-    if (!play || task <= 7 || task == 0x0B) {
-      p2Valid_ = false;
-      if (task <= 7) p2Out_ = p2Wait_ = false;  // (a new area or try: back in)
-      return false;
-    }
-    if (task != 8 || p2Out_) return false;  // (changing size, blinking: he waits; out of lives: out)
-    if (p2Wait_) {  // (lost a life: back once the other is on his feet)
-      if (!p2CanReturn()) return false;
-      p2Return();
-    }
-    if (!p2Valid_) p2Sync();
-    if ((int8_t)p2_[varIndex(0x00BB)] >= 2) {  // (down a hole: a death)
-      // (off a cloud area's end, its way out: no death, he waits for the
-      // level the game goes back to)
-      if (w[0x0743]) {
-        p2Valid_ = false;
-        p2Out_ = true;
-      } else {
-        p2Lose();
+    if (scene) return sceneNext();
+    if (!play || task != 8) return false;  // (changing size, blinking: they wait)
+    for (int id = 0; id < kCoopMax; id++) {
+      CoopPl& p = pl_[id];
+      if (id == live_ || !p.in || p.out) continue;  // (out of lives: out)
+      if (p.wait) {  // (lost a life: back once the game's player is on his feet)
+        if (!p2CanReturn()) continue;
+        p2Return(id);
       }
-      return false;
+      if (!p.valid) p2Sync(id);
+      if ((int8_t)p.v[varIndex(0x00BB)] >= 2) {  // (down a hole: a death)
+        // (off a cloud area's end, its way out: no death, he waits for the
+        // level the game goes back to)
+        if (w[0x0743]) {
+          p.valid = false;
+          p.out = true;
+        } else {
+          p2Lose(id);
+        }
+      }
     }
-    p2Timers();
     for (int i = 0; i < kKeepCount; i++) keepHold_[i] = w[kKeep[i]];
-    const bool lead = p2Leads_;
-    const bool hold = holdScroll(ram(0x0078) * 256 + ram(0x0219), liveCtrl_ ? 1 : 0);
-    swapPlayers(p1Hold_);
-    w[0x0FF4] = liveCtrl_ ? pad1_ : pad2_;  // (his controller, as the game reads them)
-    if (!lead || hold) w[0x0723] = 1;
-    coopEdge_ = !lead || hold;
-    coopMove_ = 1;
-    std::copy(w + 0x0830, w + 0x0840, dustHold_);
-    r.pc = (uint16_t)coopCall_;
-    return true;
+    moveT_.n = listOthers(moveT_.id);
+    moveT_.i = 0;
+    return moveNext();
   }
   if (pc == coopEnemyAt_) {
-    // After the enemy loop: each enemy (and power-up) meets Luigi too, the
-    // game's PlayerEnemyCollision called for it with his variables in.
+    // After the enemy loop: each enemy (and power-up) meets each other player
+    // too, the game's PlayerEnemyCollision called for it with his variables in.
     if (coopEnemy_ >= 0) {
-      // (back from one: what it did to Luigi. Hurt or powered up, the game
+      // (back from one: what it did to him. Hurt or powered up, the game
       // freezes the world for the player's size change: here it doesn't, he
-      // just changes size (a hit leaves him blinking); a fall to his death
-      // brings him back beside Mario.)
+      // just changes size (a hit leaves him blinking); a death brings him
+      // back beside the game's player.)
       const uint8_t task = w[0x000F];
       if (task != 8) {
-        if (task == 0x0B) p2Dead_ = true;
+        if (task == 0x0B) pl_[cur_].dead = true;
         w[0x0754] = w[0x0756] ? 0 : 1;  // [PlayerSize] from [PlayerStatus]
         w[0x070B] = 0;                  // [PlayerChangeSizeFlag]
         for (int i = 0; i < kHitKeepCount; i++) w[kHitKeep[i]] = hitHold_[i];
@@ -1419,76 +1999,75 @@ bool Smb1Engine::coopExec(uint32_t pc) {
       coopEnemy_++;
     } else {
       afterEnemies_ = true;  // (a death from here on: see coopDeathSmall_)
-      // Mario killed by an enemy while Luigi plays on: back beside Luigi (a
-      // life), the death undone (as it was before the enemies' turn).
-      if (coop_ && w[0x000F] == 0x0B && w[0x0759] == 0 && p2Alive(false)) {
-        for (int i = 0; i < kHitKeepCount; i++) w[kHitKeep[i]] = preLoop_[i];
-        swapRoles();  // (the other plays on; the dead one back beside him)
-        p2Lose();
-      }
-      if (!coop_ || !p2Valid_ || p2Out_ || w[0x000F] != 8 || w[0x0747]) return false;
-      for (int i = 0; i < kHitKeepCount; i++) hitHold_[i] = w[kHitKeep[i]];
-      std::copy(w + 0x11E0, w + 0x1200, palHold_);  // (Mario's palette: a hit reloads it from Luigi's state)
-      coopRegs_[0] = r.a;
-      coopRegs_[1] = r.x;
-      coopRegs_[2] = r.y;
-      swapPlayers(p1Hold_);
-      // (Each enemy's "touching the player" bit, his own: shared, Mario's
-      // not touching a shell Luigi had just kicked made it a new touch, and
-      // the moving shell hurt him.)
-      if (collBits_)
-        for (int k = 0; k < 10; k++) {
-          uint8_t& b = w[collBits_ + k];
-          if (!w[0x10 + k]) p2Coll_[k] = 0;
-          p1Coll_[k] = b & 1;
-          b = (uint8_t)((b & ~1) | p2Coll_[k]);
+      // The game's player killed by an enemy while others play on: back
+      // beside one (a life), the death undone (as before the enemies' turn).
+      if (coop_ && w[0x000F] == 0x0B && w[0x0759] == 0) {
+        const int h = heir();
+        if (h >= 0) {
+          for (int i = 0; i < kHitKeepCount; i++) w[kHitKeep[i]] = preLoop_[i];
+          const int dead = live_;
+          swapRoles(h);  // (another plays on; the dead one back beside him)
+          p2Lose(dead);
         }
-      coopEnemy_ = 0;
+      }
+      if (!coop_ || w[0x000F] != 8 || w[0x0747]) return false;
+      enemyT_.n = listOthers(enemyT_.id);
+      enemyT_.i = 0;
+      if (!enemyT_.n) return false;
+      for (int i = 0; i < kHitKeepCount; i++) hitHold_[i] = w[kHitKeep[i]];
+      std::copy(w + 0x11E0, w + 0x1200, palHold_);  // (the game's player's palette: a hit reloads it from the other's state)
+      saveRegs();
+      if (collBits_)
+        for (int k = 0; k < 10; k++) p1Coll_[k] = w[collBits_ + k] & 1;
+      if (!enemyStart()) {
+        loadRegs();
+        return false;
+      }
     }
     // (enemies proper, IDs below $15, Bowser's flame ($15), Bowser ($2D), the
     // power-ups ($2E) and cannons' Bullet Bills ($33): not lifts, springs,
     // firebars or the flag, whose own routines meet the player (see
-    // coopObjAfter_))
+    // coopObjAfter))
     auto meets = [](uint8_t id) { return id <= 0x15 || id == 0x2D || id == 0x2E || id == 0x33; };
-    while (coopEnemy_ < 10 && !(w[0x10 + coopEnemy_] && meets(w[0x1C + coopEnemy_])))
-      coopEnemy_++;
-    if (coopEnemy_ >= 10 || p2Dead_) {
+    for (;;) {
+      while (coopEnemy_ < 10 && !(w[0x10 + coopEnemy_] && meets(w[0x1C + coopEnemy_]))) coopEnemy_++;
+      if (coopEnemy_ < 10 && !pl_[cur_].dead) break;
+      // (his meetings over)
+      const int id = cur_;
+      CoopPl& p = pl_[id];
       if (collBits_)
-        for (int k = 0; k < 10; k++) {
-          uint8_t& b = w[collBits_ + k];
-          p2Coll_[k] = b & 1;
-          b = (uint8_t)((b & ~1) | p1Coll_[k]);
-        }
+        for (int k = 0; k < 10; k++) p.coll[k] = w[collBits_ + k] & 1;
       restorePlayer1(p1Hold_);
       std::copy(palHold_, palHold_ + 32, w + 0x11E0);
-      r.a = coopRegs_[0];
-      r.x = coopRegs_[1];
-      r.y = coopRegs_[2];
-      coopEnemy_ = -1;
-      if (p2Dead_) {
-        p2Lose();
-        p2Dead_ = false;
+      if (p.dead) {
+        p.dead = false;
+        p2Lose(id);
       }
-      return false;
+      if (!enemyStart()) {
+        if (collBits_)
+          for (int k = 0; k < 10; k++) {
+            uint8_t& b = w[collBits_ + k];
+            b = (uint8_t)((b & ~1) | p1Coll_[k]);
+          }
+        loadRegs();
+        coopEnemy_ = -1;
+        return false;
+      }
     }
     // JSR PlayerEnemyCollision with X (and ObjectOffset) the enemy, returning here
-    auto push = [&](uint8_t v) {
-      w[r.sp & 0x1fff] = v;
-      r.sp = r.e ? (uint16_t)(0x100 | ((r.sp - 1) & 0xff)) : (uint16_t)(r.sp - 1);
-    };
-    const uint16_t ret = (uint16_t)(coopEnemyAt_ - 1);
-    push(ret >> 8);
-    push(ret & 0xff);
+    pushRet(snes_, coopEnemyAt_);
     r.x = (uint16_t)coopEnemy_;
     w[0x009E] = (uint8_t)coopEnemy_;
     r.pc = (uint16_t)coopPEC_;
     return true;
   }
   if (pc == coopLoop_) {
-    if (!coop_ || !p2Valid_ || p2Out_ || p2Wait_) return false;
+    if (!coop_) return false;
     const uint8_t want = snes_.peek((coopLoop_ & 0xff0000) | (uint16_t)(snes_.peek16(coopLoop_ + 4) + (r.y & 0xff)));
     const bool game = w[0x0237] == want && w[0x0028] == 0;
-    const bool other = p2_[varIndex(0x0237)] == want && p2_[varIndex(0x0028)] == 0;
+    bool other = false;
+    for (int id = 0; id < kCoopMax && !other; id++)
+      other = inPlay(id) && pl_[id].v[varIndex(0x0237)] == want && pl_[id].v[varIndex(0x0028)] == 0;
     if (game || !other) return false;
     r.pc = (uint16_t)(coopLoop_ + 14);  // (the test passed)
     return true;
@@ -1496,86 +2075,74 @@ bool Smb1Engine::coopExec(uint32_t pc) {
   if (pc == coopWhirlRet_) {
     // After ProcessWhirlpools (in a water area, the whirlpools pull the game's
     // player only, and set [Whirlpool_Flag] for his swim stroke): its loop
-    // again with the other player in, his own flag cleared first as the game
-    // clears it (the water palette's step once). Luigi swam through them.
+    // again with each other in, his own flag cleared first as the game clears
+    // it (the water palette's step once). Luigi swam through them.
     if (coopWhirlPhase_ == 1) {
       restorePlayer1(p1Hold_);
-      r.a = coopRegs_[0];
-      r.x = coopRegs_[1];
-      r.y = coopRegs_[2];
+      if (whirlNext()) return true;
+      loadRegs();
       coopWhirlPhase_ = 0;
       return false;
     }
-    if (!coop_ || !p2Valid_ || p2Out_ || p2Wait_ || w[0x000F] != 8 || w[0x005C] != 0) return false;
-    p2_[varIndex(0x027D)] = 0;
+    if (!coop_ || w[0x000F] != 8 || w[0x005C] != 0) return false;
+    whirlT_.n = listOthers(whirlT_.id);
+    whirlT_.i = 0;
+    if (!whirlT_.n) return false;
+    for (int k = 0; k < whirlT_.n; k++) pl_[whirlT_.id[k]].v[varIndex(0x027D)] = 0;
     if (w[0x0747]) return false;  // ([TimerControl]: the game's leaves before the loop)
-    coopRegs_[0] = r.a;
-    coopRegs_[1] = r.x;
-    coopRegs_[2] = r.y;
-    swapPlayers(p1Hold_);
-    auto push = [&](uint8_t v) {
-      w[r.sp & 0x1fff] = v;
-      r.sp = r.e ? (uint16_t)(0x100 | ((r.sp - 1) & 0xff)) : (uint16_t)(r.sp - 1);
-    };
-    const uint16_t ret = (uint16_t)(coopWhirlRet_ - 1);
-    push(ret >> 8);
-    push(ret & 0xff);
-    coopWhirlPhase_ = 1;
-    r.pc = (uint16_t)coopWhirl_;
-    return true;
+    saveRegs();
+    return whirlNext();
   }
   if (pc == coopFire_) {
-    // After the game's fireball step (Mario's throw; both fireballs moved,
-    // but only while Mario has fire power): Luigi's throw, as the game would
-    // with his fire power and B newly pressed, his new fireball started from
-    // him (FireballObjCore with his variables in); and with Mario not fiery,
-    // the fireballs in flight moved here (they stood in the air).
-    // (One call at a time, each returning here: see coopFireQ_.)
+    // After the game's fireball step (the game's player's throw; both
+    // fireballs moved, but only while he has fire power): each other's throw,
+    // as the game would with his fire power and B newly pressed, his new
+    // fireball started from him (FireballObjCore with his variables in); and
+    // with the game's player not fiery, the fireballs in flight moved here
+    // (they stood in the air). (One call at a time, each returning here.)
     if (coopFirePhase_ == 1) {
-      if (coopFireSwap_) restorePlayer1(p1Hold_);
-      coopFireSwap_ = false;
+      if (coopFireSwap_ >= 0) restorePlayer1(p1Hold_);
+      coopFireSwap_ = -1;
     } else {
       coopFireN_ = coopFireI_ = 0;
-      if (!coop_ || !p2Valid_ || p2Out_ || w[0x000F] != 8) return false;
-      int thrown = -1;
-      const int x = w[0x06CE] & 1;  // [FireballCounter]
-      if (p2_[varIndex(0x0756)] == 2 && (p2Buttons_[0] & 0x40) && !(p2PrevAB_ & 0x40) && !w[0x33 + x] &&
-          p2_[varIndex(0x00BB)] == 1 && !p2_[varIndex(0x0714)] && p2_[varIndex(0x0028)] != 3) {
-        w[0x1603] = 0x06;    // (the fireball's sound)
-        w[0x33 + x] = 0x02;  // [Fireball_State]: to start from the player
-        p2_[varIndex(0x0711)] = p2_[varIndex(0x070C)];                 // [FireballThrowingTimer]
-        p2_[varIndex(0x0789)] = (uint8_t)(p2_[varIndex(0x070C)] - 1);  // [PlayerAnimTimer]
-        w[0x06CE]++;
-        thrown = x;
+      if (!coop_ || w[0x000F] != 8) return false;
+      int o[kCoopMax];
+      const int n = listOthers(o);
+      if (!n) return false;
+      int thrown[2] = {-1, -1};
+      for (int i = 0; i < n; i++) {
+        CoopPl& p = pl_[o[i]];
+        std::vector<uint8_t>& v = p.v;
+        const int x = w[0x06CE] & 1;  // [FireballCounter]
+        if (v[varIndex(0x0756)] == 2 && (p.buttons[0] & 0x40) && !(p.prevAB & 0x40) && !w[0x33 + x] &&
+            v[varIndex(0x00BB)] == 1 && !v[varIndex(0x0714)] && v[varIndex(0x0028)] != 3) {
+          w[0x1603] = 0x06;    // (the fireball's sound)
+          w[0x33 + x] = 0x02;  // [Fireball_State]: to start from the player
+          v[varIndex(0x0711)] = v[varIndex(0x070C)];                 // [FireballThrowingTimer]
+          v[varIndex(0x0789)] = (uint8_t)(v[varIndex(0x070C)] - 1);  // [PlayerAnimTimer]
+          w[0x06CE]++;
+          thrown[x] = o[i];
+        }
       }
       if (w[0x0756] < 2)
         for (int k = 0; k < 2; k++)
-          if (k != thrown && w[0x33 + k]) coopFireQ_[coopFireN_++] = k;
-      if (thrown >= 0) coopFireQ_[coopFireN_++] = 0x80 | thrown;
+          if (thrown[k] < 0 && w[0x33 + k]) coopFireQ_[coopFireN_++] = k;
+      for (int k = 0; k < 2; k++)
+        if (thrown[k] >= 0) coopFireQ_[coopFireN_++] = 0x80 | thrown[k] << 4 | k;
       if (!coopFireN_) return false;
-      coopRegs_[0] = r.a;
-      coopRegs_[1] = r.x;
-      coopRegs_[2] = r.y;
+      saveRegs();
     }
     if (coopFireI_ >= coopFireN_) {
-      r.a = coopRegs_[0];
-      r.x = coopRegs_[1];
-      r.y = coopRegs_[2];
+      loadRegs();
       coopFirePhase_ = 0;
       coopFireN_ = coopFireI_ = 0;
       return false;
     }
     // JSR FireballObjCore with X the fireball, returning here
     const int q = coopFireQ_[coopFireI_++];
-    coopFireSwap_ = q & 0x80;
-    if (coopFireSwap_) swapPlayers(p1Hold_);
-    auto push = [&](uint8_t v) {
-      w[r.sp & 0x1fff] = v;
-      r.sp = r.e ? (uint16_t)(0x100 | ((r.sp - 1) & 0xff)) : (uint16_t)(r.sp - 1);
-    };
-    const uint16_t ret = (uint16_t)(coopFire_ - 1);
-    push(ret >> 8);
-    push(ret & 0xff);
+    coopFireSwap_ = (q & 0x80) ? (q >> 4) & 7 : -1;
+    if (coopFireSwap_ >= 0) swapPlayers(coopFireSwap_, p1Hold_);
+    pushRet(snes_, coopFire_);
     r.x = (uint16_t)(q & 1);
     coopFirePhase_ = 1;
     r.pc = (uint16_t)coopFbCore_;
@@ -1583,34 +2150,32 @@ bool Smb1Engine::coopExec(uint32_t pc) {
   }
   if (pc == coopHammer_) {
     // PlayerHammerCollision (a hammer's own meeting with the player): run for
-    // the game's player, back here, run again with the other player in (his
-    // own [Misc_Collision_Flag]), back here, then on to its RTS.
-    auto push = [&](uint8_t v) {
-      w[r.sp & 0x1fff] = v;
-      r.sp = r.e ? (uint16_t)(0x100 | ((r.sp - 1) & 0xff)) : (uint16_t)(r.sp - 1);
-    };
-    const uint16_t ret = (uint16_t)(coopHammer_ - 1);
+    // the game's player, back here, run again with each other in (his own
+    // [Misc_Collision_Flag]), back here, then on to its RTS.
     if (coopHamPhase_ == 0) {
-      if (!coop_ || !p2Valid_ || p2Out_ || p2Wait_ || w[0x000F] != 8 || (r.x & 0xff) >= 16) return false;
+      if (!coop_ || w[0x000F] != 8 || (r.x & 0xff) >= 16) return false;
+      int o[kCoopMax];
+      if (!listOthers(o)) return false;
       coopHamSlot_ = r.x & 0xff;
       coopHamPhase_ = 1;
       for (int i = 0; i < kHitKeepCount; i++) hamPre_[i] = w[kHitKeep[i]];  // (a death's set-up, undone below)
-      push(ret >> 8);
-      push(ret & 0xff);
+      pushRet(snes_, coopHammer_);
       return false;
     }
     const int x = coopHamSlot_;
     if (coopHamPhase_ == 1) {
-      coopRegs_[0] = r.a;
-      coopRegs_[1] = r.x;
-      coopRegs_[2] = r.y;
+      saveRegs();
       if (w[0x000F] != 8) {  // (the game's player hurt: the world's frozen)
-        // (killed while the other plays on: back beside him, a life, as
-        // from an enemy; the hammers' run comes after the enemies')
-        if (w[0x000F] == 0x0B && !w[0x0759] && p2Alive(false)) {
-          for (int i = 0; i < kHitKeepCount; i++) w[kHitKeep[i]] = hamPre_[i];
-          swapRoles();
-          p2Lose();
+        // (killed while others play on: back beside one, a life, as from an
+        // enemy; the hammers' run comes after the enemies')
+        if (w[0x000F] == 0x0B && !w[0x0759]) {
+          const int h = heir();
+          if (h >= 0) {
+            for (int i = 0; i < kHitKeepCount; i++) w[kHitKeep[i]] = hamPre_[i];
+            const int dead = live_;
+            swapRoles(h);
+            p2Lose(dead);
+          }
         }
         coopHamPhase_ = 0;
         r.pc = (uint16_t)coopHammerRts_;
@@ -1618,19 +2183,14 @@ bool Smb1Engine::coopExec(uint32_t pc) {
       }
       for (int i = 0; i < kHitKeepCount; i++) hitHold_[i] = w[kHitKeep[i]];
       std::copy(w + 0x11E0, w + 0x1200, palHold_);
-      swapPlayers(p1Hold_);
       hamP1_ = w[hamFlag_ + x];
-      w[hamFlag_ + x] = p2Ham_[x];
-      r.x = (uint16_t)x;
-      w[0x009E] = (uint8_t)x;
-      coopHamPhase_ = 2;
-      push(ret >> 8);
-      push(ret & 0xff);
-      return false;
+      hamT_.n = listOthers(hamT_.id);
+      hamT_.i = 0;
+      return hamNext();
     }
-    coopHamPhase_ = 0;
-    p2Ham_[x] = w[hamFlag_ + x];
-    w[hamFlag_ + x] = hamP1_;
+    const int id = cur_;
+    CoopPl& p = pl_[id];
+    p.ham[x] = w[hamFlag_ + x];
     bool dead = false;
     if (w[0x000F] != 8) {
       dead = w[0x000F] == 0x0B;
@@ -1640,17 +2200,13 @@ bool Smb1Engine::coopExec(uint32_t pc) {
     }
     restorePlayer1(p1Hold_);
     std::copy(palHold_, palHold_ + 32, w + 0x11E0);
-    if (dead) p2Lose();
-    r.a = coopRegs_[0];
-    r.x = coopRegs_[1];
-    r.y = coopRegs_[2];
-    r.pc = (uint16_t)coopHammerRts_;
-    return true;
+    if (dead) p2Lose(id);
+    return hamNext();
   }
   if (pc == coopStar_) {
-    // The other's star over (the game's player has none): the area's music
+    // Another's star over (the game's player has none): the area's music
     // back, as the game does for its player's (JSL, returning here). The
-    // same after the other's death: the death tune (as KillPlayer queues it,
+    // same after another's death: the death tune (as KillPlayer queues it,
     // $1602 = 9), and the area's music once it's over, the game's player
     // still playing on (without a star: its end brings the music back).
     if (starMusic_) {
@@ -1675,6 +2231,15 @@ bool Smb1Engine::coopExec(uint32_t pc) {
     }
     if (musicBack_ > 0 && w[0x000F] != 8) musicBack_ = 0;
     const bool back = musicBack_ > 0 && --musicBack_ == 0;
+    // (the others' stars: one ending (at 4), one still going)
+    bool otherEnds = false, otherGoes = false;
+    for (int id = 0; id < kCoopMax; id++) {
+      const CoopPl& p = pl_[id];
+      if (id == live_ || !p.in || !p.valid || p.out) continue;
+      const uint8_t star = p.v[varIndex(0x07AF)];
+      otherEnds = otherEnds || star == 4;
+      otherGoes = otherGoes || star > 4;
+    }
     // (The tune over with the game's player starred: his star's music again;
     // its end brings the area's back. It was silent until then.)
     if (back && w[0x07AF] > 4) {
@@ -1682,9 +2247,9 @@ bool Smb1Engine::coopExec(uint32_t pc) {
       apuSnap_.clear();
       return false;
     }
-    // (The game's player's star ending with the other's going on: not the
+    // (The game's player's star ending with another's going on: not the
     // area's music yet (the game's JSL passed); the other's end brings it.)
-    if (!back && coop_ && p2Valid_ && !p2Out_ && w[0x07AF] == 4 && !w[0x0787] && p2_[varIndex(0x07AF)] > 4) {
+    if (!back && coop_ && otherGoes && w[0x07AF] == 4 && !w[0x0787]) {
       if (!musicBack_) apuSnap_.clear();
       r.pc = (uint16_t)(coopStar_ + 18);
       return true;
@@ -1705,7 +2270,7 @@ bool Smb1Engine::coopExec(uint32_t pc) {
       }
     }
     if (!musicBack_) apuSnap_.clear();
-    if (!back && (!coop_ || !p2Valid_ || w[0x07AF] || p2_[varIndex(0x07AF)] != 4 || w[0x0787])) return false;
+    if (!back && (!coop_ || w[0x07AF] || !otherEnds || otherGoes || w[0x0787])) return false;
     auto push = [&](uint8_t v) {
       w[r.sp & 0x1fff] = v;
       r.sp = r.e ? (uint16_t)(0x100 | ((r.sp - 1) & 0xff)) : (uint16_t)(r.sp - 1);
@@ -1720,98 +2285,86 @@ bool Smb1Engine::coopExec(uint32_t pc) {
     return true;
   }
   if (pc == coopVicDraw_) {
-    // The victory scene (after the axe), at the game's player's drawing:
-    // the other walks on beside him (the game's own walk, AutoControlPlayer,
-    // all else it changes undone, as in the castle walk), stops beside him
-    // at Toad, and is drawn too (GameEngine's drawing, back here). Into the
-    // lava with the bridge: out of the scene, no life lost.
-    auto push = [&](uint8_t v) {
-      w[r.sp & 0x1fff] = v;
-      r.sp = r.e ? (uint16_t)(0x100 | ((r.sp - 1) & 0xff)) : (uint16_t)(r.sp - 1);
-    };
-    const uint16_t ret = (uint16_t)(coopVicDraw_ - 1);
+    // The victory scene (after the axe), at the game's player's drawing: the
+    // others walk on beside him (the game's own walk, AutoControlPlayer, all
+    // else it changes undone, as in the castle walk), stop beside him at Toad,
+    // and are drawn too (GameEngine's drawing, back here). Into the lava with
+    // the bridge: out of the scene, no life lost.
     if (vicPhase_ == 0) {
-      if (!coop_ || !p2Valid_ || p2Out_ || p2Wait_ || w[0x0770] != 2 || !coopWalk_) return false;
-      coopRegs_[0] = r.a;
-      coopRegs_[1] = r.x;
-      coopRegs_[2] = r.y;
+      if (!coop_ || w[0x0770] != 2 || !coopWalk_) return false;
+      vicT_.n = listOthers(vicT_.id);
+      vicT_.i = 0;
+      if (!vicT_.n) return false;
+      saveRegs();
+      drawPass_++;  // (the others' drawing pass: the game's player's is the scene's own)
+      passOpen_ = true;
+      for (CoopPl& p : pl_) p.drawn = false;
+      b0Owner_ = -1;
       const int me = ram(0x0078) * 256 + ram(0x0219);
       // (Fallen, or off the screen (8-4's end, the princess's room): back
       // beside him. And once he has stopped (at Toad, at the princess), the
-      // other not by him is put there.)
+      // others not by him are put there.)
       vicStill_ = me == vicLastMe_ ? vicStill_ + 1 : 0;
       vicLastMe_ = me;
-      const int py = p2_[varIndex(0x0237)], hi = p2_[varIndex(0x00BB)];
-      const bool lost = hi != 1 || py < 0x10;
-      const bool apart = std::abs(p2X() - me) > 40 || std::abs(py - ram(0x0237)) > 8;
-      if (lost || (vicStill_ == 30 && apart)) {
-        p2Sync();
-        vicStarted_ = true;
-      }
-      if (!vicStarted_) {
-        // (Behind him on the bridge as it goes: only its picture goes, he
-        // walked on over the lava. He comes along, as after a pipe: where
-        // the axe was taken.)
-        vicStarted_ = true;
-        if (p2X() < me) {
-          p2Sync();
-          p2_[varIndex(0x0219)] = ram(0x0219);
-          p2_[varIndex(0x0078)] = ram(0x0078);
-          p2Box_[0] = boxL_[0];
-          p2Box_[1] = boxR_[0];
+      bool synced = false;
+      for (int k = 0; k < vicT_.n; k++) {
+        const int id = vicT_.id[k];
+        const std::vector<uint8_t>& v = pl_[id].v;
+        const int py = v[varIndex(0x0237)], hi = v[varIndex(0x00BB)];
+        const bool lost = hi != 1 || py < 0x10;
+        const bool apart = std::abs(xOf(id) - me) > 40 || std::abs(py - ram(0x0237)) > 8;
+        if (lost || (vicStill_ == 30 && apart)) {
+          p2Sync(id);
+          synced = true;
         }
       }
-      p2Timers();
-      std::copy(w, w + 0x2000, objBefore_.begin());
-      swapPlayers(p1Hold_);
-      w[0x0723] = 1;
-      vicPhase_ = 1;
-      push(ret >> 8);
-      push(ret & 0xff);
-      // (on to beside him, braking his skid short of him: off a ledge at a
-      // run he went over into the lava by the princess)
-      const int px = p2X();
-      const uint8_t speed = w[0x005D];
-      // (Walked on only with ground ahead, a step down at most three tiles:
-      // in 8-4's last room he walked off the step into the lava; he waits,
-      // brought beside the game's player once that one stands, see above.)
-      const int fy = w[0x0237];
-      bool ground = false;
-      for (int k = 1; k <= 3 && !ground; k++) ground = metatile(px + 24, fy + 20 + 16 * k) > 0;
-      const bool walk = px < me - 40 && (ground || metatile(px + 24, fy + 36) < 0);
-      r.a = (r.a & 0xff00) | (walk ? 0x01 : (speed && speed < 0x80 && px > me - 32) ? 0x02 : 0x00);
-      r.pc = (uint16_t)coopWalk_;
-      return true;
+      if (!vicStarted_) {
+        // (Behind him on the bridge as it goes: only its picture goes, they
+        // walked on over the lava. They come along, as after a pipe: where
+        // the axe was taken.)
+        for (int k = 0; k < vicT_.n && !synced; k++) {
+          const int id = vicT_.id[k];
+          if (xOf(id) >= me) continue;
+          CoopPl& p = pl_[id];
+          p2Sync(id);
+          p.v[varIndex(0x0219)] = ram(0x0219);
+          p.v[varIndex(0x0078)] = ram(0x0078);
+          p.box[0] = boxL_[0];
+          p.box[1] = boxR_[0];
+        }
+      }
+      vicStarted_ = true;
+      return vicNext();
     }
     if (vicPhase_ == 1) {
-      for (int i = 0; i < 3; i++) p2Buttons_[i] = w[0x000A + i];
-      p2PrevAB_ = w[0x000D];
+      // (his walk over: drawn, back here as from a JSR)
+      const int id = cur_;
+      CoopPl& p = pl_[id];
+      for (int i = 0; i < 3; i++) p.buttons[i] = w[0x000A + i];
+      p.prevAB = w[0x000D];
       restorePlayer1(p1Hold_);
       restoreLowRam(objBefore_);
-      swapPlayers(p1Hold_);
+      if (b0Owner_ >= 0 && pl_[b0Owner_].sprPass == drawPass_)
+        for (int k = 0; k < 8; k++) w[0x0801 + kP2Oam + 4 * k] = 0xF8;  // (the last one's, kept)
+      swapPlayers(id, p1Hold_);
       for (int i = 0; i < 3; i++) {
         buttonHold_[i] = w[0x000A + i];
-        w[0x000A + i] = p2Buttons_[i];
+        w[0x000A + i] = p.buttons[i];
       }
       coopP2OamClear();
       coopDrawPhase_ = 1;
       vicPhase_ = 2;
-      push(ret >> 8);
-      push(ret & 0xff);
+      pushRet(snes_, coopVicDraw_);
       r.pc = (uint16_t)coopDraw_;
       return true;
     }
-    vicPhase_ = 0;
-    r.a = coopRegs_[0];
-    r.x = coopRegs_[1];
-    r.y = coopRegs_[2];
-    return false;
+    return vicNext();  // (drawn: the next)
   }
   if (pc == coopMenu_[0] || pc == coopMenu_[1] || pc == coopMenu_[2]) {
     // (The menus after an ending and after a game over (Continue, Save &
     // Continue...) read the first controller only (Super Mario Bros.' game
     // over's takes the second's too; The Lost Levels never reads it): the
-    // other's newly pressed buttons with it, in co-op.)
+    // second's newly pressed buttons with it, in co-op.)
     if (!coop_) return false;
     const bool indexed = snes_.peek(pc) == 0xBD;
     const uint8_t v = (uint8_t)(w[0x0FF6 + (indexed ? (r.x & 0xff) : 0)] | menuPress2_);
@@ -1836,8 +2389,8 @@ bool Smb1Engine::coopExec(uint32_t pc) {
   }
   if (pc == coopThanks_) {
     // (Toad's thanks, by [CurrentPlayer]: Super Mario Bros.' co-op players
-    // are both its Mario; Luigi's when he took the axe)
-    if (!coop_ || !luigiLive_ || lostLevels_) return false;
+    // are all its Mario; Luigi's when he took the axe)
+    if (!coop_ || !isLuigi(live_) || lostLevels_) return false;
     r.a = (r.a & 0xff00) | 1;
     r.n = false;
     r.z = false;
@@ -1847,54 +2400,103 @@ bool Smb1Engine::coopExec(uint32_t pc) {
   if (pc == coopPack_) {
     // The frame's sprites all drawn: the game hands each object a run of 6
     // OAM entries (the bumped blocks' runs, $C0 and $D8, lie across the
-    // players'), drawn after the players: whatever went over a player's
-    // sprites moves to a free entry, and his are put back. (Luigi lost
-    // sprites to a bumped brick, which took his colours.)
+    // players'), drawn after the players: whatever went over the game's
+    // player's or the last other's sprites (each in his own entries) moves to
+    // a free entry, and his are put back. (Luigi lost sprites to a bumped
+    // brick, which took his colours.) The others drawn before the last go to
+    // free entries themselves.
     if (!coop_) return false;
-    const uint32_t f = snes_.frameCount();
+    const uint32_t fc = snes_.frameCount();
     // (The level card: WORLD 1-1, the player's head and his lives ([OperMode]
     // 1, [OperMode_Task] below 3, the head's tiles streamed: Mario's from
     // $0A:9A00; Luigi's, The Lost Levels' as its player, from $0A:DA00).
     // Both heads are shown: see coopLine.)
     if (w[0x0770] == 1 && w[0x0772] < 3 && w[0x028F] == 0x00 && (w[0x0290] == 0x9A || w[0x0290] == 0xDA) &&
         w[0x0291] == 0x0A) {
-      cardFrame_ = f;
+      cardFrame_ = fc;
       cardLuigi_ = w[0x0290] == 0xDA;
     }
+    // (The copies put in free entries last time, where they're still as put:
+    // gone. The game clears its sprites each frame in play, but not in the
+    // victory scene, and they piled up there frame by frame.)
+    for (CoopPl& p : pl_)
+      for (int k = 0; k < 8; k++) {
+        const int e = p.placed[k];
+        p.placed[k] = -1;
+        if (e >= 0 && std::equal(p.placedSpr[k], p.placedSpr[k] + 4, w + 0x0800 + 4 * e)) w[0x0801 + 4 * e] = 0xF8;
+      }
+    // (this frame's drawing pass; none, nothing of the players' to put back)
+    if (!passOpen_) return false;
+    passOpen_ = false;
+    const uint32_t f = drawPass_;
+    shownPass_ = f;
+    // (by where each was drawn: one who took over from the game's player
+    // since (a death after the drawing) is still in the other's entries)
+    const int fixedIds[2] = {liveDrawn_, b0Owner_};
+    auto fixed = [&](int id) { return id == fixedIds[0] || id == fixedIds[1]; };
+    for (int id = 0; id < kCoopMax; id++)
+      if (!fixed(id) && pl_[id].sprPass == f)
+        for (int& s : pl_[id].sprAt) s = -1;
     auto reserved = [&](int s) {
-      for (int p = 0; p < 2; p++)
-        if (sprFrame_[p] == f && s >= sprBase_[p] && s < sprBase_[p] + 8) return true;
+      for (const CoopPl& p : pl_)
+        if (p.sprPass == f)
+          for (int k = 0; k < 8; k++)
+            if (p.sprAt[k] == s) return true;
       return false;
     };
     int freeAt = 127;
-    for (int p = 0; p < 2; p++) {
-      if (sprFrame_[p] != f) continue;
+    auto nextFree = [&]() {
+      while (freeAt >= 0 && (reserved(freeAt) || w[0x0801 + 4 * freeAt] < 0xE0)) freeAt--;
+      return freeAt;
+    };
+    for (int id : fixedIds) {
+      if (id < 0) continue;
+      CoopPl& p = pl_[id];
+      if (p.sprPass != f) continue;
       for (int k = 0; k < 8; k++) {
-        const int s = sprBase_[p] + k;
+        const int s = p.sprAt[k];
         uint8_t* e = w + 0x0800 + 4 * s;
         uint8_t& hi = w[0x0C00 + 4 * s];
-        if (std::equal(e, e + 4, sprSave_[p][k]) && hi == sprHi_[p][k]) continue;
+        if (std::equal(e, e + 4, p.spr[k]) && hi == p.sprHi[k]) continue;
         if (e[1] < 0xE0) {  // (someone else's sprite: to a free entry)
-          while (freeAt >= 0 && (reserved(freeAt) || w[0x0801 + 4 * freeAt] < 0xE0)) freeAt--;
-          if (freeAt >= 0) {
-            std::copy(e, e + 4, w + 0x0800 + 4 * freeAt);
-            w[0x0C00 + 4 * freeAt] = hi;
-            oamX_[freeAt] = oamX_[s];
-            oamXSet_[freeAt] = oamXSet_[s];
+          const int to = nextFree();
+          if (to >= 0) {
+            std::copy(e, e + 4, w + 0x0800 + 4 * to);
+            w[0x0C00 + 4 * to] = hi;
+            oamX_[to] = oamX_[s];
+            oamXSet_[to] = oamXSet_[s];
             freeAt--;
           }
         }
-        std::copy(sprSave_[p][k], sprSave_[p][k] + 4, e);
-        hi = sprHi_[p][k];
-        oamX_[s] = sprX_[p][k];
-        oamXSet_[s] = sprXSet_[p][k];
+        std::copy(p.spr[k], p.spr[k] + 4, e);
+        hi = p.sprHi[k];
+        oamX_[s] = p.sprX[k];
+        oamXSet_[s] = p.sprXSet[k];
+      }
+    }
+    for (int id = 0; id < kCoopMax; id++) {
+      CoopPl& p = pl_[id];
+      if (fixed(id) || p.sprPass != f) continue;
+      for (int k = 0; k < 8; k++) {
+        const uint8_t y = p.spr[k][1];
+        if (y >= 0xE0 && y <= 0xF8) continue;  // (not shown)
+        const int to = nextFree();
+        if (to < 0) break;
+        std::copy(p.spr[k], p.spr[k] + 4, w + 0x0800 + 4 * to);
+        w[0x0C00 + 4 * to] = p.sprHi[k];
+        oamX_[to] = p.sprX[k];
+        oamXSet_[to] = p.sprXSet[k];
+        p.sprAt[k] = to;
+        p.placed[k] = to;
+        std::copy(p.spr[k], p.spr[k] + 4, p.placedSpr[k]);
+        freeAt--;
       }
     }
     return false;
   }
   if (pc == coopLeftHi_) {
-    // (Luigi across the left edge: his own sprites' bit 8, not Mario's; that
-    // cut Mario in half, his left column 256 px away.)
+    // (Another across the left edge: his own sprites' bit 8, not the game's
+    // player's; that cut Mario in half, his left column 256 px away.)
     if (coopDrawPhase_ != 1) return false;
     const int o = 0x0C00 + w[0x0B45];
     for (int k = 0; k < 4; k++) w[o + 8 * k] = 1;
@@ -1903,20 +2505,24 @@ bool Smb1Engine::coopExec(uint32_t pc) {
   }
   if (pc == coopDrawEnd_) {
     if (coopDrawPhase_ == 1) {
+      const int id = cur_;
       restorePlayer1(p1Hold_);
       for (int i = 0; i < 3; i++) w[0x000A + i] = buttonHold_[i];
       coopDrawPhase_ = 0;
-      p2Drawn_ = true;
-      saveSprites(1, kP2Oam);
-      // Luigi's animation frame: the tiles PlayerGfxHandler set up to stream
-      // (the console streams Mario's), from ROM.
-      if (p2_[varIndex(0x028E)]) {
-        uint32_t src = p2_[varIndex(0x0291)] << 16 | p2_[varIndex(0x0290)] << 8 | p2_[varIndex(0x028F)];
-        int bytes = std::min(512, p2_[varIndex(0x0293)] | p2_[varIndex(0x0294)] << 8);
-        p2TileBase_ = (uint16_t)(p2_[varIndex(0x0295)] | p2_[varIndex(0x0296)] << 8);
-        p2TileWords_ = (uint16_t)(bytes / 2);
+      CoopPl& p = pl_[id];
+      p.drawn = true;
+      saveSprites(id, kP2Oam);
+      b0Owner_ = id;
+      // His animation frame: the tiles PlayerGfxHandler set up to stream (the
+      // console streams the game's player's), from ROM.
+      if (p.v[varIndex(0x028E)]) {
+        const std::vector<uint8_t>& v = p.v;
+        uint32_t src = v[varIndex(0x0291)] << 16 | v[varIndex(0x0290)] << 8 | v[varIndex(0x028F)];
+        int bytes = std::min(512, v[varIndex(0x0293)] | v[varIndex(0x0294)] << 8);
+        p.tileBase = (uint16_t)(v[varIndex(0x0295)] | v[varIndex(0x0296)] << 8);
+        p.tileWords = (uint16_t)(bytes / 2);
         for (int i = 0; i < bytes / 2; i++)
-          p2Tiles_[i] = (uint16_t)(snes_.peek(src + 2 * i) | snes_.peek(src + 2 * i + 1) << 8);
+          p.tiles[i] = (uint16_t)(snes_.peek(src + 2 * i) | snes_.peek(src + 2 * i + 1) << 8);
       }
       if (vicPhase_ == 2) {  // (drawn for the victory scene: back to it, as from a JSR)
         const uint16_t sp1 = r.e ? (uint16_t)(0x100 | ((r.sp + 1) & 0xff)) : (uint16_t)(r.sp + 1);
@@ -1925,23 +2531,18 @@ bool Smb1Engine::coopExec(uint32_t pc) {
         r.sp = sp2;
         return true;
       }
-      return false;
+      return drawNext();
     }
-    p2Drawn_ = false;
+    for (CoopPl& p : pl_) p.drawn = false;
+    b0Owner_ = -1;
     if (!coop_) return false;
-    saveSprites(0, w[0x0B45]);  // (the game's player's, just drawn: see coopPack_)
-    if (!p2Valid_) return false;
-    swapPlayers(p1Hold_);
-    // (His pose is chosen from his controller too: standing only with no
-    // left or right held. Mario's walking had him run on the spot.)
-    for (int i = 0; i < 3; i++) {
-      buttonHold_[i] = w[0x000A + i];
-      w[0x000A + i] = p2Buttons_[i];
-    }
-    coopP2OamClear();
-    coopDrawPhase_ = 1;
-    r.pc = (uint16_t)coopDraw_;
-    return true;
+    drawPass_++;
+    passOpen_ = true;
+    saveSprites(live_, w[0x0B45]);  // (the game's player's, just drawn: see coopPack_)
+    liveDrawn_ = live_;
+    drawT_.n = listOthers(drawT_.id);
+    drawT_.i = 0;
+    return drawNext();
   }
   return false;
 }
@@ -1971,63 +2572,128 @@ void Smb1Engine::coopP2OamClear() {
   }
 }
 
-// Each character in his own colours: the game's own (the palettes it gives
-// Mario and Luigi in a 2-player game, normal or fire; flashing with a star).
-// The player kept aside (OAM entries 44-51) always takes them here; the
-// game's player (52-59) when he is Luigi (the game colours him as Mario).
+// Who is in which OAM entries, as the buffer goes to the PPU: the picture
+// shown next is that buffer's, while the game's logic may already be drawing
+// the next at its top (five players' turns run past the frame's start).
+void Smb1Engine::coopLatch() {
+  shownLive_ = -1;
+  shownB0_ = -1;
+  for (int id = 0; id < kCoopMax; id++) {
+    const CoopPl& p = pl_[id];
+    CoopShown& c = shown_[id];
+    // (drawn in the pass just sent)
+    c.drawn = coop_ && p.in && p.sprPass == shownPass_ && (p.drawn || id == liveDrawn_);
+    if (!c.drawn) continue;
+    for (int k = 0; k < 8; k++) {
+      c.sprAt[k] = p.sprAt[k];
+      c.tile[k] = p.spr[k][2];
+      c.attr[k] = p.spr[k][3];
+      c.spriteY[k] = p.spr[k][1];
+    }
+    c.status = gv(id, 0x0756);
+    c.star = gv(id, 0x07AF);
+    std::copy(p.tiles, p.tiles + 256, c.tiles);
+    c.tileBase = p.tileBase;
+    c.tileWords = p.tileWords;
+  }
+  if (liveDrawn_ >= 0 && shown_[liveDrawn_].drawn) shownLive_ = liveDrawn_;
+  if (b0Owner_ >= 0 && shown_[b0Owner_].drawn) shownB0_ = b0Owner_;
+}
+
+// Each player in his own colours: the game's own (the palettes it gives
+// Mario and Luigi in a 2-player game, normal or fire; flashing with a star),
+// in the colour variant he picked. The others (OAM entries 44-51 for the last
+// drawn, free entries for the rest) always take them here, with their own
+// animation frames; the game's player (52-59) when he is Luigi (the game
+// colours him as Mario).
 void Smb1Engine::coopLine(Ppu& ppu, int row) {
-  auto colours = [&](bool luigi, uint8_t status, uint8_t star, uint16_t* out) {
+  auto paint = [&](bool luigi, int variant, uint8_t status, uint8_t star, uint16_t* out) {
     uint32_t pal = luigi ? (status == 2 ? kLuigiFire : kLuigiPal) : (status == 2 ? kMarioFire : kMarioPal);
     if (star) {  // (a star: the game's star palettes in turn)
       int k = (snes_.frameCount() >> 1) & 3;
       if (k < 3) pal = kStarPals + 32 * k;
     }
     for (int i = 0; i < 16; i++) out[i] = (uint16_t)(snes_.peek(pal + 2 * i) | snes_.peek(pal + 2 * i + 1) << 8);
-    // (each in the colours chosen for him: see setCharacterColours)
-    if (const int v = luigi ? luigiVar_ : marioVar_; v > 0) {
+    if (variant > 0) {
       uint16_t src[16];
       std::copy(out, out + 16, src);
-      recolorCharacterPalette(src, out, v);
+      recolorCharacterPalette(src, out, variant);
     }
+  };
+  auto colours = [&](int id, uint8_t status, uint8_t star, uint16_t* out) {
+    paint(isLuigi(id), variantOf(id), status, star, out);
   };
   if (row == 0) {
     // (The game's logic runs during the top of the next frame: at its row 0
     // what it drew last is what the OAM shows. With a frame's delay here his
     // tiles lagged his sprites, big Luigi's poses breaking up.)
-    p2Shown_ = coop_ && p2Drawn_;
-    std::copy(p2Tiles_, p2Tiles_ + 256, ppu.objAltTiles);
-    ppu.objAltTileBase = p2TileBase_;
-    ppu.objAltTileWords = p2TileWords_;
-    if (p2Shown_) colours(!luigiLive_, p2_[varIndex(0x0756)], p2_[varIndex(0x07AF)], ppu.objAltColors);
-    liveLuigiShown_ = coop_ && luigiLive_ && !lostLevels_;
+    // (Only the entries that still hold a player's sprites, as drawn (tile
+    // and attributes): the pause menu's box, drawn into them, took his
+    // colours and tiles, dark patches across it.)
+    if (!oamUpload_) coopLatch();  // (no upload hook: as now)
+    auto held = [&](int id, uint64_t* bits) {
+      const CoopShown& c = shown_[id];
+      for (int k = 0; k < 8; k++) {
+        const int s = c.sprAt[k];
+        if (s >= 0 && s < 128 && ppu.oam[4 * s + 2] == c.tile[k] && ppu.oam[4 * s + 3] == c.attr[k])
+          bits[s >> 6] |= 1ull << (s & 63);
+      }
+    };
+    p2Shown_ = false;
+    altBits_ = alt2Bits_ = 0;
+    for (int g = 0; g < Ppu::kObjExtra; g++) {
+      extraBits_[g][0] = extraBits_[g][1] = 0;
+      extraWho_[g] = -1;
+    }
+    if (coop_) {
+      int g = 0;
+      for (int id = 0; id < kCoopMax; id++) {
+        const CoopShown& p = shown_[id];
+        if (id == shownLive_ || !p.drawn) continue;
+        const uint8_t status = p.status, star = p.star;
+        if (id == shownB0_) {
+          p2Shown_ = true;
+          std::copy(p.tiles, p.tiles + 256, ppu.objAltTiles);
+          ppu.objAltTileBase = p.tileBase;
+          ppu.objAltTileWords = p.tileWords;
+          colours(id, status, star, ppu.objAltColors);
+          uint64_t b[2] = {};
+          held(id, b);
+          altBits_ = b[0];
+        } else if (g < Ppu::kObjExtra) {
+          Ppu::ObjExtra& e = ppu.objExtra[g];
+          std::copy(p.tiles, p.tiles + 256, e.tiles);
+          e.tileBase = p.tileBase;
+          e.tileWords = p.tileWords;
+          colours(id, status, star, e.colors);
+          held(id, extraBits_[g]);
+          extraWho_[g] = id;
+          g++;
+        }
+      }
+    }
+    const int liveShown = shownLive_ >= 0 ? shownLive_ : live_;
+    liveLuigiShown_ = coop_ && isLuigi(liveShown) && !lostLevels_;
     if (coop_ && lostLevels_) {
       // (The Lost Levels colours its player as the character he is, but
       // after a swap keeps the other's colours a moment (Mario in Luigi's):
       // his own while the palette is the other's, the game's after.)
+      const bool luigiLive = isLuigi(liveShown);
       const int pal = (ram(0x0800 + ram(0x0B45) + 3) >> 1) & 7;
       const uint16_t* cg = &ppu.cgram[128 + pal * 16];
-      for (uint32_t other : {luigiLive_ ? kMarioPal : kLuigiPal, luigiLive_ ? kMarioFire : kLuigiFire}) {
+      for (uint32_t other : {luigiLive ? kMarioPal : kLuigiPal, luigiLive ? kMarioFire : kLuigiFire}) {
         bool same = true;
         for (int i = 1; i < 16 && same; i++)
           same = cg[i] == (uint16_t)(snes_.peek(other + 2 * i) | snes_.peek(other + 2 * i + 1) << 8);
         liveLuigiShown_ = liveLuigiShown_ || same;
       }
     }
-    if (liveLuigiShown_) colours(luigiLive_, ram(0x0756), ram(0x07AF), ppu.objAlt2Colors);
-    // (Only the entries that still hold the player's sprites, as drawn (tile
-    // and attributes): the pause menu's box, drawn into them, took his
-    // colours and tiles, dark patches across it.)
-    auto held = [&](int p) {
-      uint64_t bits = 0;
-      for (int k = 0; k < 8; k++) {
-        const int s = sprBase_[p] + k;
-        if (s < 64 && ppu.oam[4 * s + 2] == sprSave_[p][k][2] && ppu.oam[4 * s + 3] == sprSave_[p][k][3])
-          bits |= 1ull << s;
-      }
-      return bits;
-    };
-    altBits_ = p2Shown_ ? held(1) : 0;
-    alt2Bits_ = liveLuigiShown_ ? held(0) : 0;
+    if (liveLuigiShown_ && shownLive_ >= 0) {
+      colours(liveShown, shown_[liveShown].status, shown_[liveShown].star, ppu.objAlt2Colors);
+      uint64_t b[2] = {};
+      held(liveShown, b);
+      alt2Bits_ = b[0];
+    }
     // The level card (see coopPack_): Mario's head a head's width left,
     // Luigi's where it was (the same tiles, his colours), in free entries.
     // (Luigi's own head drawn by the game: the copy is Mario's, on the left,
@@ -2060,33 +2726,42 @@ void Smb1Engine::coopLine(Ppu& ppu, int row) {
         }
       }
       altBits_ = alt2Bits_ = 0;
+      for (int g = 0; g < Ppu::kObjExtra; g++) extraBits_[g][0] = extraBits_[g][1] = 0;
       if (cardLuigi_) {
         const uint32_t head = 0x0A9A00;  // (Mario's head)
         for (int i = 0; i < 128; i++)
           ppu.objAltTiles[i] = (uint16_t)(snes_.peek(head + 2 * i) | snes_.peek(head + 2 * i + 1) << 8);
         ppu.objAltTileBase = (uint16_t)(ram(0x0295) | ram(0x0296) << 8);
         ppu.objAltTileWords = 128;
-        colours(false, 0, 0, ppu.objAltColors);
+        paint(false, marioVar_, 0, 0, ppu.objAltColors);
       } else {
-        colours(true, 0, 0, ppu.objAlt2Colors);
+        paint(true, luigiVar_, 0, 0, ppu.objAlt2Colors);
       }
     }
     cardShown_[0] = card ? cardBits_[0] : 0;
     cardShown_[1] = card ? cardBits_[1] : 0;
-    // (testing: each one's sprites drawn, and still in their entries as drawn)
-    for (int p = 0; p < 2; p++) {
-      const uint64_t h = held(p);
-      heldNeed_[p] = heldHave_[p] = 0;
+    // (testing: the game's player's and the last other's sprites drawn, and still in their entries as drawn)
+    const int who[2] = {shownLive_, shownB0_};
+    for (int k2 = 0; k2 < 2; k2++) {
+      heldNeed_[k2] = heldHave_[k2] = 0;
+      if (who[k2] < 0) continue;
+      const CoopShown& p = shown_[who[k2]];
+      uint64_t h[2] = {};
+      held(who[k2], h);
       for (int k = 0; k < 8; k++) {
-        const int s = sprBase_[p] + k;
-        if (sprSave_[p][k][1] >= 0xE0 || s >= 64) continue;
-        heldNeed_[p]++;
-        if (h >> s & 1) heldHave_[p]++;
+        const int s = p.sprAt[k];
+        if (p.spriteY[k] >= 0xE0 || s < 0) continue;
+        heldNeed_[k2]++;
+        if (h[s >> 6] >> (s & 63) & 1) heldHave_[k2]++;
       }
     }
   }
   ppu.objAltMask[0] |= altBits_;
   ppu.objAlt2Mask[0] |= alt2Bits_;
+  for (int g = 0; g < Ppu::kObjExtra; g++) {
+    ppu.objExtra[g].mask[0] |= extraBits_[g][0];
+    ppu.objExtra[g].mask[1] |= extraBits_[g][1];
+  }
   (cardLuigi_ ? ppu.objAltMask : ppu.objAlt2Mask)[0] |= cardShown_[0];
   (cardLuigi_ ? ppu.objAltMask : ppu.objAlt2Mask)[1] |= cardShown_[1];
 }

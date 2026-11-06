@@ -46,14 +46,30 @@ public:
   };
   void applyCheats(uint32_t flags);
 
-  // ---- two-player co-op (experimental, Super Mario Bros. only; see smb1coop.cpp)
+  // ---- co-op (experimental, see smb1coop.cpp): up to five players, P1 the
+  // game's own, the others (P2 from the start, P3-P5 with Start) playing at
+  // the same time.
+  static constexpr int kCoopMax = 5;
   void setCoop(bool on);
   bool coopActive() const { return coopOk_ && coop_; }
-  // Row 0 of each frame: Luigi's sprites take his colours (see smb1coop.cpp).
+  // Every player's controller this frame and which are there (bit per
+  // player; online, those in the session): set before each frame.
+  void setPads(const uint16_t* pads, uint8_t present) {
+    for (int i = 0; i < kCoopMax; i++) extPads_[i] = pads[i];
+    padsPresent_ = present;
+  }
+  int coopPlayers() const;  // the players in the game (1 without co-op)
+  // A player dropped in or out ("P3 joined"), for the app to show (empty: none).
+  std::string takeCoopMessage() {
+    std::string m;
+    m.swap(coopMsg_);
+    return m;
+  }
+  // Row 0 of each frame: the other players' sprites take their colours (see smb1coop.cpp).
   void coopLine(Ppu& ppu, int row);
-  void coopPoke(uint16_t a, uint8_t v);  // (testing: one of Luigi's variables)
-  bool coopMidTurn() const;               // (Luigi's variables in: see smb1coop.cpp)
-  void coopCheats(uint32_t f);            // (the cheats for the other player too)
+  void coopPoke(uint16_t a, uint8_t v);  // (testing: one of P2's variables, kept aside)
+  bool coopMidTurn() const;               // (another player's variables in: see smb1coop.cpp)
+  void coopCheats(uint32_t f);            // (the cheats for the other players too)
   void coopBringIdle();
   void coopIdleSafe();
   void coopP2OamClear();
@@ -63,13 +79,15 @@ public:
   int metatile(int px, int py) const;
   // For the achievements: Luigi is the game's player (he took the axe, he's
   // on the flagpole); counts that go up as Luigi kept aside rides the
-  // flagpole, and as the player kept aside is hurt or loses a life.
-  bool coopLuigiLive() const { return coopActive() && luigiLive_; }
+  // flagpole, and as a player kept aside is hurt or loses a life.
+  bool coopLuigiLive() const { return coopActive() && isLuigi(live_); }
   // Character colour variants (Mario's, Luigi's: game/palette.h), and
   // whether the game's player is Luigi (co-op's swap, or a 2-player game's /
   // The Lost Levels' Luigi: [CurrentPlayer] $0753).
   void setCharacterColours(int mario, int luigi) { marioVar_ = mario, luigiVar_ = luigi; }
-  bool slotIsLuigi() const { return coopActive() ? luigiLive_ : snes_.wram[0x0753] != 0; }
+  bool slotIsLuigi() const { return coopActive() ? isLuigi(live_) : snes_.wram[0x0753] != 0; }
+  // The game's player's colour variant (co-op: his own pick, see coopFrame).
+  int liveVariant() const { return coopActive() ? variantOf(live_) : slotIsLuigi() ? luigiVar_ : marioVar_; }
   uint32_t coopLuigiPoles() const { return luigiPoles_; }
   uint32_t coopP2Hurts() const { return p2Hurts_; }
 
@@ -238,24 +256,112 @@ private:
   bool fillMtValid_ = false;
   uint32_t bbRead_ = 0, bbXAdder_ = 0;
 
-  // Two-player co-op: the game's player routines run a second time each frame
-  // with Luigi's variables swapped in (see smb1coop.cpp).
+  // Co-op: the game's player routines run again each frame for each other
+  // player, his variables swapped in (see smb1coop.cpp).
   bool coop_ = false, coopOk_ = false;
+  uint16_t extPads_[kCoopMax] = {};
+  uint8_t padsPresent_ = 0x1F;
+  std::string coopMsg_;
   uint32_t coopCall_ = 0, coopAfter_ = 0;  // GameCoreRoutine: JSR GameRoutines, and after it
   uint32_t coopDraw_ = 0, coopDrawEnd_ = 0;  // JSR GetPlayerOffscreenBits .. after JSR PlayerGfxHandler
-  int coopMove_ = 0, coopDrawPhase_ = 0;  // 1: Luigi's turn is running
+  int coopMove_ = 0, coopDrawPhase_ = 0;  // 1: another player's turn is running
   uint32_t coopEnemyAt_ = 0, coopPEC_ = 0;  // after the enemy loop; PlayerEnemyCollision
   uint32_t coopDeathSmall_ = 0;             // the injury routine's small-player death (see coopExec)
   bool afterEnemies_ = false;               // this frame's enemy loop has run (coopEnemyAt_)
   uint32_t coopLeftHi_ = 0;  // the player's left column's X bit 8 set (see smb1coop.cpp)
   uint32_t coopPack_ = 0;    // the OAM high table packed (the frame's sprites drawn)
-  // Each player's sprites as drawn this frame (0 the game's player, 1 the other)
-  uint8_t sprSave_[2][8][4] = {}, sprHi_[2][8] = {}, sprXSet_[2][8] = {};
-  int16_t sprX_[2][8] = {};
-  int sprBase_[2] = {};
-  uint32_t sprFrame_[2] = {~0u, ~0u};
-  void saveSprites(int p, uint8_t offset);
-  // The second player in save states (and rewind): after the rest (see smb1coop.cpp)
+  // Each player, P1-P5 (by controller). The game's player (live_) is the
+  // game's own variables; each other's are kept here, swapped in for his turns.
+  struct CoopPl {
+    bool in = false;        // in the game (P1 always; the others drop in and out)
+    bool valid = false;     // his variables here are his (else he's put beside the game's player)
+    bool out = false;       // out until the next area or try
+    bool wait = false;      // lost a life: back beside the game's player once that one stands
+    bool known = false;     // has his own power-up (kept by p2Sync)
+    bool restWait = false;  // an idle one kept out of a hole, no life lost (see coopBringIdle)
+    bool drawn = false;     // drawn this frame
+    bool dead = false;      // killed in his meeting with the enemies (see coopEnemyAt_)
+    bool idleSafe = false;  // left standing, can't be hurt (see coopIdleSafe)
+    bool stoodOk = false;
+    bool granted = false;   // his lives added to the pool (once a game, see coopJoin)
+    int colour = -1;        // his colour variant (-1: the default, see variantOf)
+    std::vector<uint8_t> v;  // his variables (kVars), kept aside
+    int box[3] = {};         // boxL_/boxR_/boxFrame_[0] of his, kept aside
+    uint8_t buttons[3] = {}, prevAB = 0;  // his [A_B, Up_Down, Left_Right_Buttons] of his turn; last frame's A and B
+    uint8_t bubble = 0, lastInj = 0;      // his [AirBubbleTimer]; his injury timer as last seen
+    uint8_t lastIc = 0;                   // [IntervalTimerControl] at his timers' last count (see p2Timers)
+    uint8_t plat[10] = {}, coll[10] = {}, ham[16] = {};  // his [PlatformCollisionFlag]s, collision bits, hammers'
+    uint8_t stood[5] = {};  // where he last stood: $78 $219 $237 $BB $28
+    uint8_t pad = 0;        // this frame's controller (SavedJoypad bits)
+    uint16_t prevRaw = 0;   // last frame's (SNES bits: Start, Select newly pressed)
+    uint32_t idle = 1u << 20, still = 1u << 20;  // frames his controller's been untouched (still: capped)
+    uint32_t edge = 0, startHeld = 0;  // frames held at the screen's left edge; Start held (to leave)
+    int sceneStuck = 0, sceneLastX = 0, sceneHop = 0;
+    // his animation frame's tiles (see coopExec)
+    uint16_t tiles[256] = {};
+    uint16_t tileBase = 0, tileWords = 0;
+    // his 8 sprites as drawn this frame, and the OAM entries they're in
+    uint8_t spr[8][4] = {}, sprHi[8] = {}, sprXSet[8] = {};
+    int16_t sprX[8] = {};
+    int sprAt[8] = {};
+    uint32_t sprPass = ~0u;  // (the drawing pass that drew them, see drawPass_)
+    // (the free entries coopPack_ put them in last, and what it wrote there)
+    int placed[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+    uint8_t placedSpr[8][4] = {};
+  };
+  CoopPl pl_[kCoopMax];
+  int live_ = 0;   // the game's player
+  int cur_ = -1;   // the one whose variables are in for his turn (-1: none)
+  int lead_ = 0;   // the one furthest right this frame (he moves the screen)
+  bool luigiBase_ = false, baseKnown_ = false;  // P1 is Luigi (The Lost Levels' Luigi game)
+  bool isLuigi(int id) const { return ((id & 1) != 0) != luigiBase_; }
+  int variantOf(int id) const;
+  // Each hook's turns for the others (by id, in order) and how far along.
+  struct TurnList {
+    int id[kCoopMax] = {};
+    int n = 0, i = 0;
+  };
+  TurnList moveT_, enemyT_, objT_, hamT_, whirlT_, vicT_, drawT_;
+  int nextTurn(TurnList& t) const;
+  int listOthers(int* out) const;  // the others in play (by id), their turns' order
+  uint16_t rawPad(int id) const;   // a player's controller this frame (SNES bits)
+  bool moveNext();
+  bool sceneNext();
+  bool enemyStart();
+  bool whirlNext();
+  bool hamNext();
+  bool vicNext();
+  bool drawNext();
+  bool anyHeld(int except) const;
+  int leader() const;
+  bool sceneNew_ = false, sceneIntro_ = false;
+  uint8_t objDead_ = 0;  // (the others an object's rerun killed: see coopObjAfter)
+  int b0Owner_ = -1;  // whose sprites are in OAM entries 44-51 (the last drawn of the others)
+  int liveDrawn_ = -1;  // ... and in the game's player's (who was the game's player as they were drawn)
+  // Each frame's drawing of the players is a pass (numbered: a frame's logic
+  // can run past the emulated frame's end, so frame numbers don't tell them
+  // apart); the last one packed is the one sent to the PPU next.
+  uint32_t drawPass_ = 0, shownPass_ = ~0u;
+  bool passOpen_ = false;
+  // Each player's sprites as sent to the PPU (at the OAM's upload: the frame
+  // shown next is that one's; the game's logic may still be drawing the next
+  // at its top, see coopLine).
+  struct CoopShown {
+    bool drawn = false;
+    int sprAt[8] = {};
+    uint8_t tile[8] = {}, attr[8] = {}, spriteY[8] = {};
+    uint8_t status = 0, star = 0;
+    uint16_t tiles[256] = {};
+    uint16_t tileBase = 0, tileWords = 0;
+  };
+  CoopShown shown_[kCoopMax];
+  int shownLive_ = -1, shownB0_ = -1;
+ public:
+  void coopLatch();  // (at the OAM's upload, see smb1.cpp)
+ private:
+  uint8_t platId_[10] = {};
+  void saveSprites(int id, uint8_t offset);
+  // The players in save states (and rewind): after the rest (see smb1coop.cpp)
   void coopSave(std::vector<uint8_t>& out) const;
  public:
   // The title screen's co-op choice, once a game starts from it (-1: none since).
@@ -268,68 +374,67 @@ private:
   void hudFrame();    // (... and the status bar's name: MARIO & LUIGI in co-op)
  private:
   void coopLoad(const uint8_t* p, size_t n);
+  void coopReset();
   uint32_t coopFire_ = 0, coopFbCore_ = 0;  // after JSR ProcFireball_Bubble; FireballObjCore
   uint32_t coopWhirl_ = 0, coopWhirlRet_ = 0;  // ProcessWhirlpools' loop; after its JSR (see coopExec)
   uint32_t bubbleTimes_ = 0;  // BubbleTimerData (see coopBubble)
-  uint8_t p2Bubble_ = 0;      // Luigi's [AirBubbleTimer]
-  uint8_t dustHold_[16] = {};  // the game's player's skid dust's OAM entries, around Luigi's turn
-  void coopBubble();
+  uint8_t dustHold_[16] = {};  // the game's player's skid dust's OAM entries, around another's turn
+  void coopBubble(int id);
   int coopWhirlPhase_ = 0;
   int coopFirePhase_ = 0;
-  int coopFireQ_[3] = {}, coopFireN_ = 0, coopFireI_ = 0;  // FireballObjCore calls to make (bit 7: Luigi's turn)
-  bool coopFireSwap_ = false;
-  uint8_t p2PrevAB_ = 0;  // Luigi's A and B of the frame before
-  bool p2Known_ = false;  // Luigi has his own power-up (kept by p2Sync)
-  void p2Lose();
-  void p2Return();
+  int coopFireQ_[4] = {}, coopFireN_ = 0, coopFireI_ = 0;  // FireballObjCore calls to make (bit 7: a player's throw, bits 4-6 who)
+  int coopFireSwap_ = -1;
+  void p2Lose(int id);
+  void p2Return(int id);
   bool p2CanReturn() const;
-  bool p2Wait_ = false;  // lost a life: back beside the other once he's on his feet
+  void coopJoin(int id);
+  void coopLeave(int id);
   // Objects that meet the player in their own routines, run again for the
-  // other player (see smb1coop.cpp): lifts, the jumpspring, firebars
+  // others (see smb1coop.cpp): lifts, the jumpspring, firebars
   void coopObjBefore(int x);
   bool coopObjAfter();
+  bool objRun();
   void restoreLowRam(const std::vector<uint8_t>& from);
   int coopObjPhase_ = 0, coopObjSlot_ = 0;
-  std::vector<uint8_t> objBefore_, objAfter_;
+  std::vector<uint8_t> objBefore_, objAfter_, objWorld_;
   uint8_t objAB_ = 0, objP2Flag_ = 0xff, objP2Spring_ = 0;
-  uint8_t p2Plat_[10] = {}, p2PlatId_[10] = {};  // his [PlatformCollisionFlag]s
   uint16_t collBits_ = 0;                        // [Enemy_CollisionBits]: bit 0 each player's own
-  uint8_t p2Coll_[10] = {}, p1Coll_[10] = {};
-  // The hammers' meeting with the player (PlayerHammerCollision), for both
+  uint8_t p1Coll_[10] = {};
+  // The hammers' meeting with the player (PlayerHammerCollision), for all
   uint32_t coopHammer_ = 0, coopHammerRts_ = 0;
   uint16_t hamFlag_ = 0;  // [Misc_Collision_Flag]
   int coopHamPhase_ = 0, coopHamSlot_ = 0;
-  uint8_t p2Ham_[16] = {}, hamP1_ = 0;
+  uint8_t hamP1_ = 0;
   uint8_t hamPre_[8] = {};
-  void p2Timers();
-  bool holdScroll(int x, int pad) const;
-  bool coopStands(bool p2) const;
-  uint8_t stoodAt_[2][5] = {};  // where the game's player (0) / Luigi (1) last stood: $78 $219 $237 $BB $28
-  bool stoodOk_[2] = {};
+  void p2Timers(int id);
+  bool holdScroll(int x, int id) const;
+  bool coopStands(int id) const;
+  uint8_t gv(int id, uint16_t a) const;  // a player's variable (the game's for its player)
+  int xOf(int id) const { return gv(id, 0x0078) * 256 + gv(id, 0x0219); }
+  bool inPlay(int id) const {  // another player taking turns
+    const CoopPl& p = pl_[id];
+    return id != live_ && p.in && p.valid && !p.out && !p.wait;
+  }
   int stoodArea_ = -1;
-  // (frames each controller untouched; one never touched yet counts as idle: else the screen
-  // waited 3 s at its right edge for a Luigi nobody plays, see holdScroll)
-  uint32_t idle_[2] = {1u << 20, 1u << 20};
-  uint32_t still_[2] = {1u << 20, 1u << 20};  // (the same, capped)
-  bool idleSafe_[2] = {};  // by controller: left standing, can't be hurt (see coopIdleSafe)
   uint32_t coopVicDraw_ = 0, coopEndStart_ = 0;
   bool start2_ = false, prevStart2_ = false;  // the victory scene's player drawing (see coopExec)
   int vicPhase_ = 0;
-  bool p2Leads_ = false;  // the other player leads this frame (moves the screen)
   bool vicStarted_ = false, endingLuigi_ = false;
   int lastMe_ = 0, vicStill_ = 0, vicLastMe_ = 0;
-  bool coopEdge_ = false;  // the screen held for the other this turn: the right edge is the view's
+  bool coopEdge_ = false;  // the screen held for another this turn: the right edge is the view's
   uint32_t coopThanks_ = 0;  // Toad's thanks, chosen by [CurrentPlayer] (see coopExec)
   void coopFrame();
   uint32_t coopWalk_ = 0;  // AutoControlPlayer (see coopAfter_)
-  int doorWait_ = 0, doorX_ = 0, sceneStuck_ = 0, sceneLastX_ = 0, sceneHop_ = 0;  // frames each controller has been left alone
+  int doorWait_ = 0, doorX_ = 0;
   uint64_t altBits_ = 0, alt2Bits_ = 0;  // OAM entries recoloured this frame (see coopLine)
+  uint64_t extraBits_[Ppu::kObjExtra][2] = {};
+  int extraWho_[Ppu::kObjExtra] = {};
   uint64_t cardBits_[2] = {}, cardShown_[2] = {};  // the level card's Luigi head (see coopPack_)
   uint32_t cardFrame_ = ~0u;
   bool cardLuigi_ = false;  // (the game's head is Luigi's: The Lost Levels, his game)
   uint32_t coopStar_ = 0, coopStarMusic_ = 0;  // the star's end; the area's music back (see coopExec)
   bool starMusic_ = false;
-  bool deathTune_ = false;  // his death's tune to play (see coopStar_), then the area's music back
+  bool deathTune_ = false;  // a death's tune to play (see coopStar_), then the area's music back
   int musicBack_ = 0;
   // The sound chip before a death's tune (lastApu_: each frame's while none is
   // queued or plays): the music goes on from there after it (apuSnap_).
@@ -337,23 +442,17 @@ private:
   uint8_t lastTrack_ = 0, musicTrack_ = 0;
   uint32_t luigiPoles_ = 0, p2Hurts_ = 0;  // (see coopLuigiPoles)
   uint32_t sceneFrame_ = 0;  // the last frame with a scene turn (the flag, the castle walk)
-  uint8_t lastP2Inj_ = 0;  // his injury timer as last seen (a hit starts it)
-  uint8_t lastInterval_ = 0;  // [IntervalTimerControl] as last seen (his timers: see coopExec)
-  int coopEnemy_ = -1;                      // the enemy Luigi is meeting (-1: none)
-  bool p2Dead_ = false;
-  bool p2Out_ = false;  // out of lives: Luigi sits out until the next area or try
+  int coopEnemy_ = -1;                      // the enemy the player in turn is meeting (-1: none)
   uint8_t preTurn_[8] = {}, preLoop_[8] = {};  // (a death's set-up, undone: see smb1coop.cpp)
-  bool p2Alive(bool needLife = true) const;
-  void swapRoles();
+  bool p2Alive(int id, bool needLife = true) const;
+  int heir() const;  // another player alive to carry on for the game's (-1: none)
+  void swapRoles(int id);
   int marioVar_ = 0, luigiVar_ = 0;
-  bool boxAfterSwap_ = false;  // the game's player box is the other brother's (see swapRoles)
-  bool restWait_ = false;      // the waiting brother is an idle one kept out of a hole, no life lost (see coopBringIdle)
-  bool luigiLive_ = false;  // Luigi is the game's player (Mario kept aside): see swapRoles
-  bool liveCtrl_ = false;   // the game's player is on the second controller
+  bool boxAfterSwap_ = false;  // the game's player box is another's (see swapRoles)
   // The title's third choice, co-op (see smb1title in smb1coop.cpp): the
   // cursor's row (0, 1: the game's; 2: co-op), and the pick for SmasGame.
   uint32_t titleInput_ = 0;
-  uint32_t livesSet_ = 0;  // just past the lives' start from the save (STA NumberofLives): co-op's at least 10
+  uint32_t livesSet_ = 0;  // just past the lives' start from the save (STA NumberofLives): co-op's 5 a player
   int titleCursor_ = 0, titlePick_ = -1;
   uint8_t titleMode_ = 0xff;
   bool titleShown_ = false;
@@ -364,25 +463,19 @@ private:
   uint16_t hudName_[5] = {}, hudAmp_ = 0;  // (its own name; the &'s tile)
   bool titleExec(uint32_t pc);
   bool lostLevels_ = false;  // The Lost Levels' engine (each character his own physics and sprites)
-  bool liveLuigiShown_ = false;
-  uint8_t pad1_ = 0, pad2_ = 0;  // this frame's controllers (SavedJoypad bits)
+  bool liveLuigiShown_ = false, p2Shown_ = false;
   uint16_t coopRegs_[3] = {};
   uint8_t hitHold_[8] = {}, palHold_[32] = {};
-  uint8_t p2Buttons_[3] = {}, buttonHold_[3] = {};  // Luigi's [A_B, Up_Down, Left_Right_Buttons] of his turn
-  int p2Box_[3] = {}, boxHold_[3] = {};  // boxL_/boxR_/boxFrame_[0] of the player not in play
-  bool p2Valid_ = false, p2Drawn_ = false, p2Shown_ = false;
-  // Luigi's animation frame's tiles (see coopExec)
-  uint16_t p2Tiles_[256] = {};
-  uint16_t p2TileBase_ = 0, p2TileWords_ = 0;
-  bool lockForced_ = false;  // [ScrollLock] set for Mario's turn (Luigi is ahead)
-  std::vector<uint8_t> p2_, p1Hold_, keepHold_;
+  uint8_t buttonHold_[3] = {};
+  int boxHold_[3] = {};
+  bool lockForced_ = false;  // [ScrollLock] set for the game's player's turn (another is ahead)
+  std::vector<uint8_t> p1Hold_, keepHold_;
   void coopInit(uint8_t bankLo, uint8_t bankHi);
   bool coopExec(uint32_t pc);
-  void p2Sync();
-  void swapPlayers(std::vector<uint8_t>& hold);
+  void p2Sync(int id);
+  void swapPlayers(int id, std::vector<uint8_t>& hold);
   void restorePlayer1(std::vector<uint8_t>& hold);
-  int p2X() const;
-  uint8_t p2Var(uint16_t a) const;  // (one of the kept-aside player's variables)
+  uint8_t p2Var(uint16_t a) const;  // (one of P2's variables, or the first other's)
 
   // Signature search; bytes equal to 0x100 in `sig` match anything.
   uint32_t findSig(const uint16_t* sig, size_t n, uint8_t bankLo, uint8_t bankHi) const;

@@ -591,8 +591,12 @@ void Ppu::renderObj(int row, int x0, int x1) {
 
   // (Sprites with their own colours (SMB1 co-op's Luigi) go behind the rest:
   // his OAM entries come before Mario's, and overlapping him cut Mario in half.)
-  if (objAltMask[0] | objAltMask[1])
-    std::stable_partition(list, list + count, [&](int idx) { return !((objAltMask[idx >> 6] >> (idx & 63)) & 1); });
+  bool anyExtra = false;
+  for (const ObjExtra& g : objExtra) anyExtra = anyExtra || g.mask[0] || g.mask[1];
+  if (objAltMask[0] | objAltMask[1] || anyExtra)
+    std::stable_partition(list, list + count, [&](int idx) {
+      return !((objAltMask[idx >> 6] >> (idx & 63)) & 1) && (!anyExtra || objExtraOf(idx) < 0);
+    });
   int tiles = 0;
   for (int k = count - 1; k >= 0; k--) {
     int idx = list[k];
@@ -616,6 +620,9 @@ void Ppu::renderObj(int row, int x0, int x1) {
     int pal = (attr >> 1) & 7;
     const bool alt = (objAltMask[idx >> 6] >> (idx & 63)) & 1;
     const bool alt2 = (objAlt2Mask[idx >> 6] >> (idx & 63)) & 1;
+    const ObjExtra* ex = nullptr;
+    if (anyExtra && !alt)
+      if (int g = objExtraOf(idx); g >= 0) ex = &objExtra[g];
     int pri = ((attr >> 4) & 3) + 1;
     bool hf = attr & 0x40, vf = attr & 0x80;
     int sy = (row - y) & 0xff;
@@ -648,6 +655,10 @@ void Ppu::renderObj(int row, int x0, int x1) {
         w0 = objAltTiles[adr - objAltTileBase];
         uint16_t a1 = (adr + 8) & 0x7fff;
         if ((uint16_t)(a1 - objAltTileBase) < objAltTileWords) w1 = objAltTiles[a1 - objAltTileBase];
+      } else if (ex && (uint16_t)(adr - ex->tileBase) < ex->tileWords) {
+        w0 = ex->tiles[adr - ex->tileBase];
+        uint16_t a1 = (adr + 8) & 0x7fff;
+        if ((uint16_t)(a1 - ex->tileBase) < ex->tileWords) w1 = ex->tiles[a1 - ex->tileBase];
       }
       for (int px = 0; px < 8; px++) {
         int x = tx + px;
@@ -657,6 +668,7 @@ void Ppu::renderObj(int row, int x0, int x1) {
                     (((w1 >> (s + 8)) & 1) << 3);
         if (!p) continue;
         out[x].col = alt                                  ? objAltColors[p]
+                     : ex                                 ? ex->colors[p]
                      : alt2                               ? objAlt2Colors[p]
                      : (objPalOverrideMask & (1 << pal)) ? objPalOverride[pal][p]
                                                           : cgram[128 + pal * 16 + p];
@@ -808,6 +820,7 @@ void Ppu::renderLine(int line) {
   objZoneCount = 0;
   objAltMask[0] = objAltMask[1] = 0;
   objAlt2Mask[0] = objAlt2Mask[1] = 0;
+  for (ObjExtra& g : objExtra) g.mask[0] = g.mask[1] = 0;
   for (int l = 0; l < 4; l++) {
     hideWideBg[l] = false;
     bgHofsAdj[l] = 0;
@@ -913,13 +926,14 @@ void Ppu::objMoves() {
     curBig[idx] = big;
     // (tile, name, palette, flips; bit 12: recoloured, co-op's Luigi)
     curKey[idx] = (uint16_t)(oam[idx * 4 + 2] | (oam[idx * 4 + 3] & 0xcf) << 8 |
-                             (((objAltMask[idx >> 6] >> (idx & 63)) & 1) << 12));
+                             (((objAltMask[idx >> 6] >> (idx & 63)) & 1) << 12) |
+                             ((objExtraOf(idx) >= 0) << 13));  // (bit 13: another player's)
     curOn[idx] = !(y >= fh && y + h <= 256);
     objDx_[idx] = objDy_[idx] = 0;
     matched[idx] = taken[idx] = exact[idx] = false;
   }
   auto dyOf = [](int y, int py) { return (int)(int8_t)(uint8_t)(y - py); };
-  auto look = [](uint16_t k) { return k & 0x1e00; };  // (palette, recoloured)
+  auto look = [](uint16_t k) { return k & 0x3e00; };  // (palette, recoloured)
   // Last frame's sprite of its palette and size nearest its place (within
   // half its width).
   for (int idx = 0; idx < 128; idx++) {

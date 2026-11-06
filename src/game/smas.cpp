@@ -96,9 +96,14 @@ void SmasGame::beforeFrame() {
   if (smb3_) smb3_->setCoop(coop && game_ == GameId::SMB3);
   // (co-op: the CPU at twice its speed, so the second player's turn doesn't
   // slow busy scenes down; one player keeps the console's own timing)
-  snes_.setCpuFast(coop && (game_ == GameId::SMB1 || game_ == GameId::SMBLL || game_ == GameId::SMB3));
+  // (... and more for more players: each one's turn is the player's code again)
+  int speed = coop && (game_ == GameId::SMB1 || game_ == GameId::SMBLL || game_ == GameId::SMB3) ? 2 : 1;
+  if (Smb1Engine* e = engine(); e && speed > 1) speed = std::max(speed, std::min(e->coopPlayers(), 4));
+  snes_.setCpuSpeed(speed);
   if (Smb1Engine* e = engine()) {
+    e->setPads(pads, padsPresent);
     e->frameStart(reqExt_, enemyRange, hudAnchor);
+    if (std::string m = e->takeCoopMessage(); !m.empty()) message_ = m;
     extL_ = e->extL();
     extR_ = e->extR();
     gameplay_ = e->gameplay();
@@ -411,7 +416,7 @@ void SmasGame::applyPlayerPalette(Ppu& ppu) {
   Smb1Engine* e = engine();
   if (e) e->setCharacterColours(playerPalette, luigiPalette);  // (co-op's other brother: see coopLine)
   // (the game's player: Mario's or Luigi's, whichever he is)
-  const int variant = e && e->slotIsLuigi() ? luigiPalette : playerPalette;
+  const int variant = e ? e->liveVariant() : playerPalette;
   if (variant <= 0 || !gameplay_) return;
   int pal = -1;
   if (e) {

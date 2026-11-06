@@ -649,6 +649,25 @@ static void execLine(const std::string& line) {
     std::string b;
     ss >> b;
     s.input[1] = parseButtons(b);
+  } else if (cmd == "hold3" || cmd == "hold4" || cmd == "hold5") {
+    // players 3-5's controllers (co-op: SmasGame::pads)
+    std::string b;
+    ss >> b;
+    g_game->pads[cmd[4] - '1'] = parseButtons(b);
+  } else if (cmd == "hash") {
+    // the machine's state in short: frame, CPU cycles, line, WRAM's FNV-1a hash, the APU's cycles
+    uint64_t h = 1469598103934665603ull;
+    for (uint8_t b : s.wram) h = (h ^ b) * 1099511628211ull;
+    printf("hash f%u cyc %llu v%u wram %016llx apu %llu\n", s.frameCount(), (unsigned long long)s.masterCycles(), s.vPos(),
+           (unsigned long long)h, (unsigned long long)s.apu.cycles());
+  } else if (cmd == "midturn") {
+    // co-op: a player's turn left unfinished at this frame's end (should never be)
+    if (g_game->coopMidTurn()) printf("MIDTURN at frame %u\n", s.frameCount());
+  } else if (cmd == "present") {
+    // which players are there (bit per player, hex: online's session)
+    std::string b;
+    ss >> b;
+    g_game->padsPresent = (uint8_t)strtoul(b.c_str(), 0, 16);
   } else if (cmd == "oam") {
     // print visible OAM entries; sx = where the PPU draws it relative to the
     // 4:3 screen (the game layer's true X, else the 9-bit X split as in renderObj)
