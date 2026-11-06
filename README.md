@@ -5,7 +5,76 @@ re-anchored HUDs, display options, cheats, level select, achievements, a sound t
 player. **It contains no game data: it runs from your own ROM**
 (`Super Mario All-Stars (USA).sfc`, CRC32 `925637C7`); no game starts without it.
 
+> **This fork adds [Online Play](#online-play):** two-player co-op over the internet, between Windows and
+> Linux. Ready-made builds come from [GitHub Actions](#github-actions-windows-and-linux-no-tools-needed).
+
+## Online Play
+
+Two players on two computers, as if both controllers were plugged into one console. The **host** is
+controller 1 (Mario), the player who **joins** is controller 2 (Luigi), each with their own keyboard or
+controller. Only the controllers travel over the network: both computers run the same game, so it works
+in co-op, the original 2 PLAYER GAMEs and Super Mario Bros. 3's battle game alike.
+
+### Before you start
+- Both players need **this build** (the same version: the official releases can't connect to it).
+- Both need **their own ROM**, the same dump (a copier header doesn't matter). Never share or upload it.
+- If a music pack (MSU-1) is used, both need the same one; otherwise both choose none.
+
+### Connecting
+The joining player has to reach UDP port **7845** on the host's computer. Pick one:
+
+| Way | What to do | Address to join |
+|---|---|---|
+| **VPN** (easiest) | Both install [Tailscale](https://tailscale.com/), [ZeroTier](https://www.zerotier.com/) or Radmin VPN and join the same network. No router changes. | The host's VPN address, e.g. `100.101.102.103` |
+| **Port forwarding** | The host forwards **UDP** port 7845 on the router to their computer. | The host's public IP (see [whatismyip.com](https://www.whatismyip.com/)), e.g. `203.0.113.5` |
+| **Same home network** | Nothing. | The host's local address, e.g. `192.168.1.20` |
+
+On Windows, allow the game through the firewall when it asks (the host must).
+
+### Playing
+1. **Host:** *Menu → Online Play → Host a Game* (from the launcher's *Options* too), or start the game with
+   `--host` (`--host 7900` for another port). The Online Play page shows this computer's addresses.
+2. **Join:** *Menu → Online Play → Join a Game*, type or paste (<kbd>Ctrl</kbd>+<kbd>V</kbd>) the host's
+   address, with `:port` if it isn't 7845, then <kbd>Enter</kbd>. Or start with `--join 100.101.102.103`.
+3. **The host starts a game** as usual, for example Super Mario Bros. → *CO-OP GAME*. The joining player's
+   screen follows into it by itself.
+
+### While connected
+- **Either player's menu pauses the game for both**; the other sees *"... paused"*.
+- **The host can do everything**: save and load states, *Reset Game*, the level select, cheats, settings.
+  The other player is brought back in step a moment later.
+- **The joining player** can't load states or start games; *Return to Launcher* (or *Online Play → Leave*)
+  leaves the session.
+- The **host's** game, save files and game-changing settings (widescreen width, co-op, cheats, NES Brick
+  Bounce) are used by both. The joining player's own save files are never touched and come back when they
+  leave.
+- **Input delay:** a button press reaches the game a few frames later, so it has time to reach the other
+  computer. *Auto* picks it from the ping; *Online Play → Input Delay* sets it (the host's setting is used).
+  Lower feels snappier; higher stutters less on a slow connection.
+- Rewind and fast forward are off while connected.
+- Every second the two games are compared; if they ever differ, the host's is sent again by itself
+  (a short pause).
+
+With *Options → Display → Show FPS* on, the ping is shown beside the frame rate.
+
 ## Building
+
+### GitHub Actions (Windows and Linux, no tools needed)
+The workflow [`.github/workflows/online-build.yml`](.github/workflows/online-build.yml) builds both
+versions on GitHub's computers:
+
+1. Push to the `online-play` branch of your fork, or open the **Actions** tab → **Online Play Builds** →
+   **Run workflow**.
+2. Wait for the run to finish (about 10–15 minutes) and open it.
+3. Under **Artifacts**, download:
+   - `SuperMarioAllStars-Windows` — unzip it, put the ROM beside `SuperMarioAllStars.exe` (or in a `roms`
+     folder there), run the exe.
+   - `SuperMarioAllStars-Linux-x86_64` — unzip it, `chmod +x` the AppImage and run it; the ROM goes in
+     `~/.local/share/SuperMarioAllStars/roms` (or drop it on the window).
+
+Artifacts need you to be signed in to GitHub and are kept for 90 days. They contain no game data.
+
+### Windows
 Requirements: Windows 10/11, Visual Studio 2022 (C++ workload) and CMake 3.20+.
 No other libraries are needed (Direct3D 11, Direct2D, XAudio2, XInput and
 DirectInput come with Windows).
@@ -14,6 +83,17 @@ DirectInput come with Windows).
 build.bat
 ```
 The program is written to `build\Release\SuperMarioAllStars.exe`.
+
+### Linux
+Requirements: a C++17 compiler, CMake 3.20+, and the SDL2, FreeType and OpenGL ES development packages
+(Arch: `sdl2 freetype2 mesa`; Debian/Ubuntu: `libsdl2-dev libfreetype-dev libgles-dev`).
+
+```
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
+The program is `build/SuperMarioAllStars`; put `third_party/fonts/LuckiestGuy-Regular.ttf` beside it for the
+launcher's title. Settings, saves and the ROM live in `~/.local/share/SuperMarioAllStars`.
 
 ### Android
 The same code builds for Android (`android/`), as the Mickey & Donald Collection's does: SDL2 2.32.10
