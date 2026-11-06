@@ -48,6 +48,10 @@ enum Action {
   kActCount
 };
 
+// Players at once: the console's two controllers, and three more the co-op
+// engines read (see SmasGame::pads); local or online (see netplay.h).
+constexpr int kMaxPlayers = 5;
+
 // A binding: keyboard VK code or joypad control.
 struct Binding {
   enum Type : uint8_t { None = 0, Key, PadButton, PadAxisPos, PadAxisNeg, PadHat };
@@ -116,13 +120,14 @@ struct Config {
   bool fastForward = true;     // hold Fast Forward to run at 4x
   // Achievements count (cheats, level select, fast forward and rewind are off meanwhile)
   bool achievements = true;
-  int padIndex[2] = {0, 1};    // which physical pad drives player 1/2
-  Binding keys[2][kActCount];
-  Binding pad[2][kActCount];
+  int padIndex[kMaxPlayers] = {0, 1, 2, 3, 4};  // which physical pad drives each player
+  Binding keys[kMaxPlayers][kActCount];
+  Binding pad[kMaxPlayers][kActCount];
   // Online play
   int netPort = 7845;          // the UDP port to host on
   std::string netAddress;      // the host joined last
   int netDelay = 0;            // input delay in frames (0: from the ping)
+  int netLocalPlayers = 1;     // players on this computer in online play (their players 1..N controls)
   // Cheats (bit flags per cheat id)
   uint64_t cheats = 0;
 

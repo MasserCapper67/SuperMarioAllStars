@@ -1,14 +1,16 @@
 // Online play: the app's side (see netplay.h for the protocol).
 //
-// The host's console is the session's: its local controller is controller 1,
-// the client's is controller 2, and the host's settings that change what the
-// console does (widescreen margin, co-op, cheats, NES brick bounce...) are
-// used by both while connected. The host's menu does everything as usual;
+// The host's console is the session's. Each computer's players are slots P1
+// to P5 (the host's first; see netplay.h), each played with that computer's
+// players 1..N controls; P1 and P2 are the console's controllers, P3 to P5
+// the co-op engines' (SmasGame::pads). The host's settings that change what
+// the console does (widescreen margin, co-op, cheats, NES brick bounce...)
+// are used by all while connected. The host's menu does everything as usual;
 // whatever it changes (a state loaded, a game started, the level select, a
-// setting) is sent as a new sync point when the game resumes. The client
-// plays, opens its menu (which pauses both), and leaves; it can't load
-// states or start games meanwhile. Its own battery save is never written
-// while the console holds the host's, and comes back when the session ends.
+// setting) is sent as a new sync point when the game resumes. The others
+// play, open their menus (which pause everyone), and leave; they can't load
+// states or start games meanwhile. Their own battery saves are never written
+// while the console holds the host's, and come back when the session ends.
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -16,6 +18,8 @@
 
 #include "app/app.h"
 #include "app/vkeys.h"
+
+static_assert(Netplay::kMaxPlayers == kMaxPlayers && SmasGame::kPlayers == kMaxPlayers, "players at once");
 
 // ---------------------------------------------------------------------------
 // Each pass
@@ -86,6 +90,7 @@ bool App::netGameFrames(double dt, int gameFrames, bool emulate) {
         // point: one more frame on its own first, as a save state waits for)
         snes->input[0] = padState[0];
         snes->input[1] = 0;
+        for (int p = 0; p < kMaxPlayers; p++) game->pads[p] = p == 0 ? padState[0] : 0;
         game->beforeFrame();
         snes->runFrame();
         game->afterFrame();
@@ -110,16 +115,18 @@ bool App::netGameFrames(double dt, int gameFrames, bool emulate) {
   int runs = gameFrames > 0 ? std::clamp(gameFrames + net.timeAdjust(), 0, 4) : 0;
   int ran = 0;
   for (int i = 0; i < runs; i++) {
-    net.pushLocal(padState[0]);
-    uint16_t p1 = 0, p2 = 0;
-    if (!net.inputs(&p1, &p2)) {
-      // (the other side's controller isn't here yet: a moment's wait, then
-      // this refresh shows the last picture)
-      if (i == 0 && net.peerPause() == Netplay::kRunning) net.wait(6);
-      if (!net.inputs(&p1, &p2)) break;
+    net.pushLocal(padState);  // (this computer's players 1..N, for its slots in order)
+    uint16_t pads[kMaxPlayers] = {};
+    if (!net.inputs(pads)) {
+      // (someone's controller isn't here yet: a moment's wait, then this
+      // refresh shows the last picture)
+      if (i == 0 && net.pausedSlot() < 0) net.wait(6);
+      if (!net.inputs(pads)) break;
     }
-    snes->input[0] = p1;
-    snes->input[1] = p2;
+    snes->input[0] = pads[0];
+    snes->input[1] = pads[1];
+    for (int p = 0; p < kMaxPlayers; p++) game->pads[p] = pads[p];
+    game->padsPresent = net.activeSlots();
     game->beforeFrame();
     snes->runFrame();
     game->afterFrame();
@@ -168,7 +175,7 @@ void App::netHostSync() {
 // Client: the host's sync point into this console.
 void App::netApplySync(NetSync& s) {
   if (!snes || !game) {
-    net.stop("Player 2 has no ROM loaded");
+    net.stop("A player has no ROM loaded");
     return;
   }
   if (!netSramForeign) {  // (this player's own progress saved first: the console takes the host's now)
@@ -183,7 +190,7 @@ void App::netApplySync(NetSync& s) {
   netHaveSet = true;
   netApplySettings(netSet);
   if (!snes->loadState(s.state)) {
-    net.stop("Player 2 couldn't load the host's game");
+    net.stop("Couldn't load the host's game");
     return;
   }
   game->onStateLoaded();
@@ -277,7 +284,7 @@ void App::netHost(int port) {
   }
   net.setIdentity(netIdentity());
   std::string err;
-  if (!net.startHost(port, &err)) {
+  if (!net.startHost(port, cfg.netLocalPlayers, &err)) {
     menu.notify("Couldn't host: " + err, 6.0f);
     return;
   }
@@ -287,9 +294,9 @@ void App::netHost(int port) {
   netLastPhase = net.phase();
   std::string ips = net.localAddresses();
   menu.notify("Hosting on UDP port " + std::to_string(port) + (ips.empty() ? "" : " (this computer: " + ips + ")") +
-                  " - waiting for player 2",
+                  " as " + Netplay::slotList(net.localSlots()) + " - waiting for players",
               6.0f);
-  logf("netplay: hosting on port %d", port);
+  logf("netplay: hosting on port %d, %d player(s) here", port, cfg.netLocalPlayers);
   if (menu.open()) menu.refresh();
 }
 
@@ -300,7 +307,7 @@ void App::netJoin(const std::string& address) {
   }
   net.setIdentity(netIdentity());
   std::string err;
-  if (!net.startJoin(address, &err)) {
+  if (!net.startJoin(address, cfg.netLocalPlayers, &err)) {
     menu.notify("Couldn't join: " + err, 6.0f);
     return;
   }
@@ -308,44 +315,52 @@ void App::netJoin(const std::string& address) {
   cfg.save(configPath);
   netLastPhase = net.phase();
   menu.notify("Connecting to " + net.peerName() + "...", 3.0f);
-  logf("netplay: joining %s", net.peerName().c_str());
+  logf("netplay: joining %s with %d player(s)", net.peerName().c_str(), cfg.netLocalPlayers);
   if (menu.open()) menu.refresh();
 }
 
 std::string App::netStatus() const {
   if (!net.active()) return std::string();
   const bool host = net.isHost();
-  const char* other = host ? "player 2" : "the host";
   switch (net.phase()) {
     case Netplay::Phase::Waiting:
-      return host ? "Online: waiting for player 2 (port " + std::to_string(net.port()) + ")"
+      return host ? "Online: waiting for players (port " + std::to_string(net.port()) + ")"
                   : "Online: connecting to " + net.peerName() + "...";
     case Netplay::Phase::Connected:
-      return host ? (inLauncher ? "Online: player 2 is here - start a game" : "Online: starting...")
+      return host ? (inLauncher ? "Online: " + Netplay::slotList(othersSlots()) + " here - start a game"
+                                : "Online: starting...")
                   : "Online: waiting for the host to start a game";
     case Netplay::Phase::Syncing: {
       const int pc = (int)(net.syncProgress() * 100 + 0.5f);
-      return std::string("Online: syncing with ") + other + " " + std::to_string(pc) + "%";
+      return "Online: syncing " + std::to_string(pc) + "%";
     }
-    case Netplay::Phase::Playing:
+    case Netplay::Phase::Playing: {
       if (inLauncher || menu.open()) return std::string();
       if (netStall < 0.25) return std::string();
-      if (net.peerPause() == Netplay::kMenu) return std::string("Online: ") + (host ? "player 2" : "the host") + " paused";
-      if (net.peerPause() == Netplay::kNoGame) return "Online: the host is choosing a game";
-      return std::string("Online: waiting for ") + other + "...";
+      const int s = net.pausedSlot();
+      if (s >= 0 && net.pausedWhy() == Netplay::kNoGame) return "Online: the host is choosing a game";
+      if (s >= 0) return "Online: " + (s == 0 && !host ? std::string("the host") : "P" + std::to_string(s + 1)) + " paused";
+      return host ? "Online: waiting for the other players..." : "Online: waiting for the host...";
+    }
     default: return std::string();
   }
+}
+
+// The other computers' players (bit per slot).
+uint8_t App::othersSlots() const {
+  uint8_t m = 0;
+  for (const Netplay::PeerInfo& p : net.peers()) m |= p.slots;
+  return m;
 }
 
 std::string App::netSummary() const {
   if (!net.active()) return "Not connected";
   const bool host = net.isHost();
-  switch (net.phase()) {
-    case Netplay::Phase::Waiting:
-      return host ? "Hosting on port " + std::to_string(net.port()) + ", waiting" : "Connecting to " + net.peerName();
-    default: break;
-  }
-  std::string s = (host ? "Player 2: " : "Host: ") + net.peerName();
+  if (net.phase() == Netplay::Phase::Waiting)
+    return host ? "Hosting on port " + std::to_string(net.port()) + ", waiting" : "Connecting to " + net.peerName();
+  std::string s = "You: " + Netplay::slotList(net.localSlots());
+  if (host) s += "  \xE2\x80\xA2  " + std::to_string(net.peers().size()) + (net.peers().size() == 1 ? " computer" : " computers") + " joined";
+  else s += "  \xE2\x80\xA2  host " + net.peerName();
   if (net.rttMs() >= 0) s += "  \xE2\x80\xA2  " + std::to_string(net.rttMs()) + " ms";
   if (net.phase() == Netplay::Phase::Playing) s += "  \xE2\x80\xA2  delay " + std::to_string(net.delay());
   return s;
@@ -359,18 +374,18 @@ std::shared_ptr<MenuPage> App::pageOnline() {
   p->title = "Online Play";
   p->rebuild = [this](MenuPage& pg) {
     pg.items.clear();
-    pg.subtitle = net.active() ? (net.isHost() ? "Hosting" : "Player 2") : "Two players over the internet";
-    MenuItem st = MenuItem::info("Status", "Online co-op: the host is controller 1 (Mario), the other player "
-                                           "controller 2 (Luigi). Both need this same version and ROM.");
+    pg.subtitle = net.active() ? (net.isHost() ? "Hosting" : "Joined") : "Up to 5 players over the internet";
+    MenuItem st = MenuItem::info("Status", "Each computer's players get the next free places, P1 to P5 (the host's "
+                                           "first): P1 is Mario, P2 Luigi. Everyone needs this same version and ROM.");
     st.valueText = [this]() { return netSummary(); };
     pg.items.push_back(st);
     if (!net.active()) {
       pg.items.push_back(MenuItem::header("Start"));
       pg.items.push_back(MenuItem::action("Host a Game", [this]() { netHost(cfg.netPort); },
-                                          "Wait for player 2 to join this computer. Forward UDP port " +
+                                          "Wait for others to join this computer. Forward UDP port " +
                                               std::to_string(cfg.netPort) +
                                               " on your router to this computer (or share a VPN such as Tailscale "
-                                              "or ZeroTier), and give player 2 your address."));
+                                              "or ZeroTier), and give the others your address."));
       MenuItem join = MenuItem::action("Join a Game", [this]() {
         menu.push(pageTextEntry("Join a Game", "The host's address: an IP or name, with :port if not " +
                                                    std::to_string(Netplay::kDefaultPort) + ".",
@@ -378,11 +393,17 @@ std::shared_ptr<MenuPage> App::pageOnline() {
                                   menu.pop();
                                   netJoin(t);
                                 }));
-      }, "Connect to a player who is hosting. The host's game starts here for you, as player 2.");
+      }, "Connect to a player who is hosting. The host's game starts here for you.");
       join.valueText = [this]() { return cfg.netAddress; };
       pg.items.push_back(join);
+      std::vector<std::string> counts;
+      for (int n = 1; n < kMaxPlayers; n++) counts.push_back(std::to_string(n));
+      pg.items.push_back(MenuItem::choice(
+          "Players on This Computer", counts, [this]() { return std::clamp(cfg.netLocalPlayers, 1, kMaxPlayers - 1) - 1; },
+          [this](int v) { cfg.netLocalPlayers = v + 1; },
+          "How many play on this computer, each with their own Player 1, Player 2... controls (Options > Controls)."));
       MenuItem port = MenuItem::action("Host Port", [this]() {
-        menu.push(pageTextEntry("Host Port", "The UDP port to host on (1-65535). Player 2 adds it to your address "
+        menu.push(pageTextEntry("Host Port", "The UDP port to host on (1-65535). The others add it to your address "
                                              "unless it is " + std::to_string(Netplay::kDefaultPort) + ".",
                                 std::to_string(cfg.netPort), true, [this](const std::string& t) {
                                   const int v = atoi(t.c_str());
@@ -401,15 +422,29 @@ std::shared_ptr<MenuPage> App::pageOnline() {
     } else {
       if (net.isHost()) {
         const std::string ips = net.localAddresses();
-        MenuItem a = MenuItem::info("This Computer", "Player 2 joins with one of these on your network or VPN; "
+        MenuItem a = MenuItem::info("This Computer", "The others join with one of these on your network or VPN; "
                                                      "over the internet, with your public IP (and the port "
                                                      "forwarded to this computer).");
         a.valueText = [ips, this]() { return (ips.empty() ? std::string("?") : ips) + "  port " + std::to_string(net.port()); };
         pg.items.push_back(a);
       }
+      pg.items.push_back(MenuItem::header("Players"));
+      for (int s = 0; s < kMaxPlayers; s++) {
+        MenuItem row = MenuItem::info("P" + std::to_string(s + 1) + (s == 0 ? " (Mario)" : s == 1 ? " (Luigi)" : ""));
+        row.valueText = [this, s]() {
+          if (net.localSlots() >> s & 1) return std::string("This computer");
+          for (const Netplay::PeerInfo& pi : net.peers())
+            if (pi.slots >> s & 1) {
+              if (net.isClient()) return std::string("Online");
+              return pi.name + (pi.rttMs >= 0 ? "  \xE2\x80\xA2  " + std::to_string(pi.rttMs) + " ms" : std::string());
+            }
+          return std::string("Free");
+        };
+        pg.items.push_back(row);
+      }
       pg.items.push_back(MenuItem::action(net.isHost() ? "Stop Hosting" : "Leave", [this]() {
-        net.stop(net.isHost() ? "The host ended the session" : "Player 2 left");
-      }, net.isHost() ? "End the session: player 2 is told, and you play on alone."
+        net.stop(net.isHost() ? "The host ended the session" : "");
+      }, net.isHost() ? "End the session: the others are told, and you play on alone."
                       : "Leave the session: back to the launcher, with your own save files."));
     }
     pg.items.push_back(MenuItem::header("Connection"));
@@ -421,7 +456,7 @@ std::shared_ptr<MenuPage> App::pageOnline() {
                                      if (net.isHost() && net.connected()) netDirty = true;  // (in use from the next sync point)
                                    },
                                    "Frames between pressing a button and the game seeing it, so it reaches the other "
-                                   "player in time. Auto picks it from the ping. Higher: smoother on a slow "
+                                   "players in time. Auto picks it from the pings. Higher: smoother on a slow "
                                    "connection. The host's setting is used.");
     dl.valueText = [this]() {
       const int d = std::clamp(cfg.netDelay, 0, Netplay::kMaxDelay);

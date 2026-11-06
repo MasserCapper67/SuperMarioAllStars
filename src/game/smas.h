@@ -73,7 +73,13 @@ public:
   bool enemyRange = true;               // extend enemy activity to the widescreen view
   Smb1Engine* smb1Engine() { return game_ == GameId::SMBLL ? smbll_.get() : smb1_.get(); }  // (testing)
   bool coop = false;
-  int coopPick = -1;  // a title screen's co-op choice (1 on, 0 off) for the app to keep; -1: none
+  int coopPick = -1;
+  // Every player's controller this frame (P1 and P2 are also the console's
+  // own two), and which players are there (bit per player: online, those in
+  // the session; else all), for the co-op engines.
+  static constexpr int kPlayers = 5;
+  uint16_t pads[kPlayers] = {};
+  uint8_t padsPresent = 0x1F;  // a title screen's co-op choice (1 on, 0 off) for the app to keep; -1: none
 
   // ---- cheats
   static const std::vector<CheatDef>& cheatList();

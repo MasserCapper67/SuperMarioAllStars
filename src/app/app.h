@@ -98,13 +98,13 @@ struct App {
   bool pendingDisplayMode = false;  // re-apply the display mode from the main loop
   float menuAnim = 0;
   // input state
-  uint16_t padState[2] = {0, 0};
-  bool prevAction[2][kActCount] = {};
-  bool prevSelect[2] = {false, false};
-  bool prevMenuBtn[2] = {false, false};
-  float selectHeld[2] = {0, 0};
-  bool selectConsumed[2] = {false, false};
-  float selectPulse[2] = {0, 0};  // seconds of game Select still to send
+  uint16_t padState[kMaxPlayers] = {};
+  bool prevAction[kMaxPlayers][kActCount] = {};
+  bool prevSelect[kMaxPlayers] = {};
+  bool prevMenuBtn[kMaxPlayers] = {};
+  float selectHeld[kMaxPlayers] = {};
+  bool selectConsumed[kMaxPlayers] = {};
+  float selectPulse[kMaxPlayers] = {};  // seconds of game Select still to send
   bool menuWasOpen = false;
   bool prevMenuNav[8] = {};
   // timing
@@ -294,6 +294,7 @@ struct App {
   void netJoin(const std::string& address);
   std::string netStatus() const;   // the on-screen line (empty: nothing to say)
   std::string netSummary() const;  // the Online Play page's status row
+  uint8_t othersSlots() const;     // the other computers' players (bit per slot)
   std::shared_ptr<MenuPage> pageOnline();
   std::shared_ptr<MenuPage> pageTextEntry(const std::string& title, const std::string& hint, const std::string& initial,
                                           bool digitsOnly, std::function<void(const std::string&)> done);

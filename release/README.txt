@@ -184,13 +184,19 @@ How it plays:
 
 
 =====================================================================
- ONLINE PLAY (two players over the internet)
+ ONLINE PLAY (up to 5 players over the internet)
 =====================================================================
 
-One player hosts and is controller 1 (Mario); the other joins and is
-controller 2 (Luigi), with their own keyboard or controller (their player 1
-controls). Both run the same game: only the controllers travel over the
-network, so it works with co-op, the 2 PLAYER GAMEs and SMB3's battle game.
+Each player gets a place, P1 to P5: the host's players first, then each
+computer's as it joins. P1 is Mario and P2 Luigi (the console's two
+controllers), so co-op, the 2 PLAYER GAMEs and SMB3's battle game all work.
+Every computer runs the same game: only the controllers travel.
+
+Work in progress: P3 to P5 can join and their controllers reach the game,
+but they have no character on screen yet (coming game by game).
+
+Several can play on one computer: Online Play > Players on This Computer
+(each with their own Player 1, Player 2... controls in Options > Controls).
 
 Both players need this same version of the port and the same ROM (and the
 same music pack, or none).

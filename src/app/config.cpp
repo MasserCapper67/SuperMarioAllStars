@@ -100,7 +100,7 @@ std::string bindingName(const Binding& b) {
 
 void Config::setDefaults() {
   *this = Config();
-  for (int p = 0; p < 2; p++)
+  for (int p = 0; p < kMaxPlayers; p++)
     for (int a = 0; a < kActCount; a++) keys[p][a] = pad[p][a] = Binding();
   auto K = [](int vk) { Binding b; b.type = Binding::Key; b.code = (uint16_t)vk; return b; };
   auto P = [](int btn) { Binding b; b.type = Binding::PadButton; b.code = (uint16_t)btn; return b; };
@@ -137,8 +137,9 @@ void Config::setDefaults() {
   keys[1][kActR] = K('O');
   keys[1][kActStart] = K('P');
   keys[1][kActSelect] = K('B');
-  // Joypads (Xbox positional layout: bottom = SNES B, right = SNES A)
-  for (int p = 0; p < 2; p++) {
+  // Joypads (Xbox positional layout: bottom = SNES B, right = SNES A); players
+  // 3 to 5 have no keys, their own pads
+  for (int p = 0; p < kMaxPlayers; p++) {
     pad[p][kActUp] = P(kPadBtnUp);
     pad[p][kActDown] = P(kPadBtnDown);
     pad[p][kActLeft] = P(kPadBtnLeft);
@@ -155,8 +156,7 @@ void Config::setDefaults() {
   }
   pad[0][kActFastForward] = P(kPadBtnRT);
   pad[0][kActRewind] = P(kPadBtnLT);
-  padIndex[0] = 0;
-  padIndex[1] = 1;
+  for (int p = 0; p < kMaxPlayers; p++) padIndex[p] = p;
 }
 
 namespace {
@@ -248,6 +248,7 @@ bool Config::load(const std::wstring& path) {
   geti("netplay.port", netPort, 1, 65535);
   if (kv.count("netplay.address")) netAddress = kv["netplay.address"];
   geti("netplay.delay", netDelay, 0, 10);
+  geti("netplay.local_players", netLocalPlayers, 1, kMaxPlayers - 1);
   geti("graphics.filter", filter, 0, kFilterCount - 1);
   geti("graphics.scanlines", scanlines, 0, 100);
   geti("graphics.crt_curve", crtCurve, 0, 100);
@@ -281,9 +282,8 @@ bool Config::load(const std::wstring& path) {
   getb("input.rewind", rewind);
   getb("input.fast_forward", fastForward);
   getb("achievements.on", achievements);
-  geti("input.p1_pad", padIndex[0], 0, 7);
-  geti("input.p2_pad", padIndex[1], 0, 7);
-  for (int p = 0; p < 2; p++) {
+  for (int p = 0; p < kMaxPlayers; p++) geti(("input.p" + std::to_string(p + 1) + "_pad").c_str(), padIndex[p], 0, 7);
+  for (int p = 0; p < kMaxPlayers; p++) {
     for (int a = 0; a < kActCount; a++) {
       std::string k = "p" + std::to_string(p + 1) + "_keys." + kActionKeys[a];
       if (kv.count(k)) keys[p][a] = decodeBinding(kv[k]);
@@ -321,6 +321,7 @@ bool Config::save(const std::wstring& path) const {
   f << "port=" << netPort << "\n";
   f << "address=" << netAddress << "\n";
   f << "delay=" << netDelay << "\n";
+  f << "local_players=" << netLocalPlayers << "\n";
   f << "[launcher]\n";
   f << "last_game=" << lastGame << "\n";
   f << "allstars_only=" << launcherAllStars << "\n";
@@ -365,9 +366,8 @@ bool Config::save(const std::wstring& path) const {
   f << "touch_opacity=" << touchOpacity << "\n";
   f << "rewind=" << rewind << "\n";
   f << "fast_forward=" << fastForward << "\n";
-  f << "p1_pad=" << padIndex[0] << "\n";
-  f << "p2_pad=" << padIndex[1] << "\n";
-  for (int p = 0; p < 2; p++) {
+  for (int p = 0; p < kMaxPlayers; p++) f << "p" << (p + 1) << "_pad=" << padIndex[p] << "\n";
+  for (int p = 0; p < kMaxPlayers; p++) {
     f << "[p" << (p + 1) << "_keys]\n";
     for (int a = 0; a < kActCount; a++) f << kActionKeys[a] << "=" << encodeBinding(keys[p][a]) << "\n";
     f << "[p" << (p + 1) << "_pad]\n";

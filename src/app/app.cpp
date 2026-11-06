@@ -278,8 +278,8 @@ void App::launchGame(GameId g) {
 }
 
 void App::returnToLauncher() {
-  if (net.isClient()) {  // (player 2: leaving the host's game is leaving the session; see netEnded)
-    net.stop("Player 2 left");
+  if (net.isClient()) {  // (a joined player: leaving the host's game is leaving the session; see netEnded)
+    net.stop("");
     return;
   }
   netDirty = true;
@@ -760,7 +760,7 @@ void App::updateInput(double dt) {
 #else
   input.poll();
 #endif
-  for (int p = 0; p < 2; p++) readPlayer(p, &padState[p], dt);
+  for (int p = 0; p < kMaxPlayers; p++) readPlayer(p, &padState[p], dt);
 #ifndef _WIN32
   touchFrame();
   padState[0] |= touch.takeSnesButtons();
@@ -768,6 +768,10 @@ void App::updateInput(double dt) {
   if (!snes) return;
   snes->input[0] = menu.open() || inLauncher ? 0 : padState[0];
   snes->input[1] = menu.open() || inLauncher ? 0 : padState[1];
+  if (game) {  // (players 3 to 5: the co-op engines read them; see SmasGame::pads)
+    for (int p = 0; p < kMaxPlayers; p++) game->pads[p] = menu.open() || inLauncher ? 0 : padState[p];
+    game->padsPresent = (uint8_t)((1 << kMaxPlayers) - 1);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1623,10 +1627,11 @@ std::shared_ptr<MenuPage> App::pageControls() {
   p->title = "Controls";
   p->rebuild = [this](MenuPage& pg) {
     pg.items.clear();
-    pg.items.push_back(MenuItem::submenu("Player 1 Keyboard", [this]() { menu.push(pageBindings(0, false)); }));
-    pg.items.push_back(MenuItem::submenu("Player 1 Joypad", [this]() { menu.push(pageBindings(0, true)); }));
-    pg.items.push_back(MenuItem::submenu("Player 2 Keyboard", [this]() { menu.push(pageBindings(1, false)); }));
-    pg.items.push_back(MenuItem::submenu("Player 2 Joypad", [this]() { menu.push(pageBindings(1, true)); }));
+    for (int pl = 0; pl < kMaxPlayers; pl++) {
+      const std::string n = "Player " + std::to_string(pl + 1);
+      pg.items.push_back(MenuItem::submenu(n + " Keyboard", [this, pl]() { menu.push(pageBindings(pl, false)); }));
+      pg.items.push_back(MenuItem::submenu(n + " Joypad", [this, pl]() { menu.push(pageBindings(pl, true)); }));
+    }
     std::vector<std::string> pads;
     for (int i = 0; i < 8; i++) {
       const PadState* ps = input.pad(i);
@@ -1635,10 +1640,10 @@ std::shared_ptr<MenuPage> App::pageControls() {
       else n += ": " + narrow(ps->name) + (ps->connected ? "" : " (unplugged)");
       pads.push_back(n);
     }
-    pg.items.push_back(MenuItem::choice("Player 1 Uses", pads, [this]() { return cfg.padIndex[0]; },
-                                        [this](int v) { cfg.padIndex[0] = v; }));
-    pg.items.push_back(MenuItem::choice("Player 2 Uses", pads, [this]() { return cfg.padIndex[1]; },
-                                        [this](int v) { cfg.padIndex[1] = v; }));
+    for (int pl = 0; pl < kMaxPlayers; pl++)
+      pg.items.push_back(MenuItem::choice("Player " + std::to_string(pl + 1) + " Uses", pads,
+                                          [this, pl]() { return cfg.padIndex[pl]; },
+                                          [this, pl](int v) { cfg.padIndex[pl] = v; }));
     pg.items.push_back(MenuItem::choice("Select Button", {"Opens Menu", "Tap: Game Select  -  Hold: Menu"},
                                         [this]() { return cfg.selectMode; },
                                         [this](int v) { cfg.selectMode = v; },

@@ -5,15 +5,25 @@ re-anchored HUDs, display options, cheats, level select, achievements, a sound t
 player. **It contains no game data: it runs from your own ROM**
 (`Super Mario All-Stars (USA).sfc`, CRC32 `925637C7`); no game starts without it.
 
-> **This fork adds [Online Play](#online-play):** two-player co-op over the internet, between Windows and
-> Linux. Ready-made builds come from [GitHub Actions](#github-actions-windows-and-linux-no-tools-needed).
+> **This fork adds [Online Play](#online-play):** co-op over the internet for up to 5 players, between
+> Windows and Linux. Ready-made builds come from [GitHub Actions](#github-actions-windows-and-linux-no-tools-needed).
 
 ## Online Play
 
-Two players on two computers, as if both controllers were plugged into one console. The **host** is
-controller 1 (Mario), the player who **joins** is controller 2 (Luigi), each with their own keyboard or
-controller. Only the controllers travel over the network: both computers run the same game, so it works
-in co-op, the original 2 PLAYER GAMEs and Super Mario Bros. 3's battle game alike.
+Up to 5 players on up to 5 computers, as if every controller were plugged into one console. Each player
+gets a place, **P1** to **P5**: the host's players first, then each computer's as it joins. **P1** is Mario
+and **P2** Luigi, the console's two controllers, so co-op, the original 2 PLAYER GAMEs and Super Mario
+Bros. 3's battle game all work. Only the controllers travel over the network: every computer runs the same
+game.
+
+> **Work in progress:** players **P3 to P5** can already join, and their controllers reach the game on every
+> computer, but they don't have a character on screen yet. That comes next, game by game (Super Mario Bros.
+> and The Lost Levels first, then Super Mario Bros. 3, then Super Mario Bros. 2), with drop-in by pressing
+> Start and a colour of your choice.
+
+Several people can play on one computer: set *Online Play → Players on This Computer* (each uses their own
+*Player 1*, *Player 2*... controls from *Options → Controls*; players 3 to 5 are on the 3rd to 5th gamepad by
+default).
 
 ### Before you start
 - Both players need **this build** (the same version: the official releases can't connect to it).
@@ -21,11 +31,11 @@ in co-op, the original 2 PLAYER GAMEs and Super Mario Bros. 3's battle game alik
 - If a music pack (MSU-1) is used, both need the same one; otherwise both choose none.
 
 ### Connecting
-The joining player has to reach UDP port **7845** on the host's computer. Pick one:
+The other computers have to reach UDP port **7845** on the host's computer. Pick one:
 
 | Way | What to do | Address to join |
 |---|---|---|
-| **VPN** (easiest) | Both install [Tailscale](https://tailscale.com/), [ZeroTier](https://www.zerotier.com/) or Radmin VPN and join the same network. No router changes. | The host's VPN address, e.g. `100.101.102.103` |
+| **VPN** (easiest) | Everyone installs [Tailscale](https://tailscale.com/), [ZeroTier](https://www.zerotier.com/) or Radmin VPN and joins the same network. No router changes. | The host's VPN address, e.g. `100.101.102.103` |
 | **Port forwarding** | The host forwards **UDP** port 7845 on the router to their computer. | The host's public IP (see [whatismyip.com](https://www.whatismyip.com/)), e.g. `203.0.113.5` |
 | **Same home network** | Nothing. | The host's local address, e.g. `192.168.1.20` |
 
@@ -36,24 +46,27 @@ On Windows, allow the game through the firewall when it asks (the host must).
    `--host` (`--host 7900` for another port). The Online Play page shows this computer's addresses.
 2. **Join:** *Menu → Online Play → Join a Game*, type or paste (<kbd>Ctrl</kbd>+<kbd>V</kbd>) the host's
    address, with `:port` if it isn't 7845, then <kbd>Enter</kbd>. Or start with `--join 100.101.102.103`.
-3. **The host starts a game** as usual, for example Super Mario Bros. → *CO-OP GAME*. The joining player's
-   screen follows into it by itself.
+3. **The host starts a game** as usual, for example Super Mario Bros. → *CO-OP GAME*. Everyone's screen
+   follows into it by itself. Others can join (or leave) at any time; the game pauses for a moment while
+   they are brought in.
 
 ### While connected
-- **Either player's menu pauses the game for both**; the other sees *"... paused"*.
+- **Anyone's menu pauses the game for everyone**; the others see *"P3 paused"* (or *"the host paused"*).
 - **The host can do everything**: save and load states, *Reset Game*, the level select, cheats, settings.
-  The other player is brought back in step a moment later.
-- **The joining player** can't load states or start games; *Return to Launcher* (or *Online Play → Leave*)
-  leaves the session.
+  The others are brought back in step a moment later.
+- **The others** can't load states or start games; *Return to Launcher* (or *Online Play → Leave*) leaves
+  the session.
 - The **host's** game, save files and game-changing settings (widescreen width, co-op, cheats, NES Brick
-  Bounce) are used by both. The joining player's own save files are never touched and come back when they
+  Bounce) are used by everyone. The others' own save files are never touched and come back when they
   leave.
+- *Online Play* lists who plays where (P1 to P5), with each computer's ping on the host.
 - **Input delay:** a button press reaches the game a few frames later, so it has time to reach the other
-  computer. *Auto* picks it from the ping; *Online Play → Input Delay* sets it (the host's setting is used).
-  Lower feels snappier; higher stutters less on a slow connection.
+  computers. *Auto* picks it from the pings (with three or more computers a little more, as controllers pass
+  through the host); *Online Play → Input Delay* sets it (the host's setting is used). Lower feels snappier;
+  higher stutters less on a slow connection.
 - Rewind and fast forward are off while connected.
-- Every second the two games are compared; if they ever differ, the host's is sent again by itself
-  (a short pause).
+- Every second each computer's game is compared with the host's; if one ever differs, the host's is sent
+  to it again by itself (a short pause).
 
 With *Options → Display → Show FPS* on, the ping is shown beside the frame rate.
 
