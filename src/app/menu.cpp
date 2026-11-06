@@ -574,7 +574,10 @@ void Menu::drawOsd(int w, int h, const std::string& fps, const std::string& stat
     roundRect(r, (r.bottom - r.top) * 0.3f, rgb(0x181C26, 0.85f));
     text(widen(t), r, 20 * s, true, c, kAlignCenter);
   };
-  if (!status.empty()) card(rectF(16 * s, 16 * s, 236 * s, 52 * s), status, rgb(0xFFD866));
+  if (!status.empty()) {  // (as wide as its text: online play's lines are longer)
+    const float tw = std::max(220 * s, measure(widen(status), 20 * s, true) + 36 * s);
+    card(rectF(16 * s, 16 * s, 16 * s + tw, 52 * s), status, rgb(0xFFD866));
+  }
   if (!fps.empty()) card(rectF(w - 196 * s, 16 * s, w - 16 * s, 52 * s), fps, rgb(0x9BE59B));
   drawToasts(w, h, s);
   drawBanner(w, h, s);

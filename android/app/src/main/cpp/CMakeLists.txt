@@ -47,6 +47,8 @@ add_library(main SHARED
   ${SRC}/app/msupack.cpp
   ${SRC}/app/achexport.cpp
   ${SRC}/app/updatecheck.cpp
+  ${SRC}/app/netplay.cpp
+  ${SRC}/app/app_net.cpp
   ${SRC}/platform/android/app_android.cpp
   ${SRC}/platform/android/video_gles.cpp
   ${SRC}/platform/android/audio_sdl.cpp

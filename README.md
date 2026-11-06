@@ -253,6 +253,19 @@ What each page holds:
   other stands, small and blinking. Either can take a pipe or a
   door, or grab the goal card or a Koopaling's wand: the other goes along, into the next area in
   the form he had. The map has Mario only; the level start card reads MARIO START! / LUIGI START!.
+* **Online Play** (the menu's *Online Play*, or `--host [port]` / `--join address`; see `src/app/netplay.h` and
+  `src/app/app_net.cpp`) — two copies of the port in lockstep over UDP (port 7845 by default, forwarded to the
+  host, or a VPN such as Tailscale). The console is deterministic, so only the controllers travel: the host's local
+  controller is controller 1, the client's controller 2, and each frame runs on both once both are known, a few
+  frames after they were pressed (the input delay, from the ping; Online Play > Input Delay). The host sends its
+  save state as a *sync point*, with the settings that change what the console does (widescreen margin, co-op,
+  cheats, NES Brick Bounce): at the start, after its menu changed something (a state loaded, a game started, a
+  setting), and when the two drift apart (every second each hashes its work RAM; the client compares). States go
+  as a run-length coded XOR delta to the last sync point (about 120 KB the first time, 10-20 KB after), in
+  acknowledged chunks; inputs are sent redundantly until acknowledged, so a lost packet costs nothing. Either
+  side's menu pauses both. The client can't load states or start games; its battery save is never written while
+  the console holds the host's, and is read back when the session ends. Both need the same version, ROM (a copier
+  header aside) and music pack, checked as the client joins.
 * **Co-op speed** — the game's player code runs twice a frame in co-op, which slowed busy scenes
   down on the console's own clock, so with co-op on (SMB1, The Lost Levels, SMB3) the emulated
   CPU runs at twice its speed (`Snes::setCpuFast`); the PPU, DMA and sound chip keep their timing.

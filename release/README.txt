@@ -184,6 +184,42 @@ How it plays:
 
 
 =====================================================================
+ ONLINE PLAY (two players over the internet)
+=====================================================================
+
+One player hosts and is controller 1 (Mario); the other joins and is
+controller 2 (Luigi), with their own keyboard or controller (their player 1
+controls). Both run the same game: only the controllers travel over the
+network, so it works with co-op, the 2 PLAYER GAMEs and SMB3's battle game.
+
+Both players need this same version of the port and the same ROM (and the
+same music pack, or none).
+
+  Host:  Menu > Online Play > Host a Game (or start with --host).
+         Forward UDP port 7845 on your router to your computer, or use a VPN
+         such as Tailscale, ZeroTier or Radmin VPN, and give the other player
+         your address. Windows asks to let the game through its firewall:
+         allow it. Then start a game as usual.
+  Join:  Menu > Online Play > Join a Game, type (or Ctrl+V) the host's
+         address, e.g. 203.0.113.5 or 100.64.1.2:7845, Enter
+         (or start with --join ADDRESS).
+
+  - The host's game, settings that change the game (widescreen width, co-op,
+    cheats, NES Brick Bounce) and save files are used by both while
+    connected. Player 2's own save files are never touched, and come back
+    when they leave.
+  - Either player's menu pauses the game for both. The host can do
+    everything as usual (save and load states, Reset Game, the level select,
+    cheats); player 2 joins in again a moment later. Player 2 can't load
+    states or start games; Return to Launcher leaves the session.
+  - Input delay: a button press reaches the game a few frames later, so it
+    has time to reach the other computer. Auto picks it from the ping
+    (Online Play > Input Delay sets it). Rewind and fast forward are off.
+  - Every second the two games are compared; if they ever differ, the host's
+    is sent again by itself.
+
+
+=====================================================================
  WIDESCREEN
 =====================================================================
 

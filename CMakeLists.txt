@@ -60,11 +60,13 @@ add_executable(SuperMarioAllStars WIN32
   src/app/msupack.cpp
   src/app/achexport.cpp
   src/app/updatecheck.cpp
+  src/app/netplay.cpp
+  src/app/app_net.cpp
   src/app/app.rc
 )
 target_include_directories(SuperMarioAllStars PRIVATE third_party/stb)
 target_link_libraries(SuperMarioAllStars smascore
-  d3d11 dxgi d3dcompiler d2d1 dwrite xaudio2 xinput dinput8 dxguid winmm comdlg32 shell32 ole32 user32 gdi32 winhttp)
+  d3d11 dxgi d3dcompiler d2d1 dwrite xaudio2 xinput dinput8 dxguid winmm comdlg32 shell32 ole32 user32 gdi32 winhttp ws2_32)
 set_target_properties(SuperMarioAllStars PROPERTIES OUTPUT_NAME "SuperMarioAllStars")
 target_link_options(SuperMarioAllStars PRIVATE /MANIFEST:NO)
 # librashader (slang shader presets), loaded at run time when present
@@ -99,6 +101,8 @@ elseif(UNIX AND NOT ANDROID)
     src/app/msupack.cpp
     src/app/achexport.cpp
     src/app/updatecheck.cpp
+    src/app/netplay.cpp
+    src/app/app_net.cpp
     src/platform/android/video_gles.cpp
     src/platform/android/audio_sdl.cpp
     src/platform/android/input_sdl.cpp

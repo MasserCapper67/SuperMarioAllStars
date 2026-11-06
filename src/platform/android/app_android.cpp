@@ -304,6 +304,7 @@ void App::run() {
         case SDL_CONTROLLERAXISMOTION:
           if (std::abs(e.caxis.value) > 20000) touchActive = false;
           break;
+        case SDL_TEXTINPUT: textTyped += e.text.text; break;
         case SDL_FINGERDOWN:
           touchActive = true;
           touch.onDown((int64_t)e.tfinger.fingerId, e.tfinger.x * W, e.tfinger.y * H);
@@ -395,4 +396,11 @@ extern "C" int SDL_main(int, char*[]) {
   app->shutdown();
   g_app = nullptr;
   return rc;
+}
+
+std::string platformClipboardText() {
+  char* t = SDL_GetClipboardText();
+  std::string s = t ? t : "";
+  SDL_free(t);
+  return s;
 }

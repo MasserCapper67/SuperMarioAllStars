@@ -233,6 +233,8 @@ void App::pollRom(double dt) {
 // All-Stars menu to the game's save files, out of sight (see
 // SmasGame::requestTitle), as a new run for achievements.
 void App::launchGame(GameId g) {
+  if (netBlocked("start a game")) return;
+  netDirty = true;   // (online: player 2 gets it once it's running)
   pendingSave = -1;  // (a save waiting for a co-op turn's end: not into another game)
   if (!snes) {
 #ifdef _WIN32
@@ -276,6 +278,11 @@ void App::launchGame(GameId g) {
 }
 
 void App::returnToLauncher() {
+  if (net.isClient()) {  // (player 2: leaving the host's game is leaving the session; see netEnded)
+    net.stop("Player 2 left");
+    return;
+  }
+  netDirty = true;
   pendingSave = -1;
   if (rewinding) endRewind();
   saveSram();
@@ -365,7 +372,7 @@ void App::loadSram() {
 }
 
 void App::saveSram() {
-  if (!snes) return;
+  if (!snes || netSramForeign) return;  // (player 2 online: the console holds the host's save files)
   if (writeAll(pathJoin(saveDir, L"smas.srm"), snes->sram, sizeof(snes->sram))) {
     snes->sramDirty = false;
     sramFailed = false;
@@ -436,6 +443,7 @@ void App::saveState(int slot) {
 }
 
 void App::loadState(int slot) {
+  if (netBlocked("load states")) return;
   pendingSave = -1;  // (the timeline it was asked in is gone)
   std::vector<uint8_t> d;
   if (!readAll(statePath(slot), d)) {
@@ -444,6 +452,7 @@ void App::loadState(int slot) {
   }
   if (snes->loadState(d)) {
     game->onStateLoaded();
+    netDirty = true;  // (online: player 2 gets it as the game resumes)
     rewind.clear();  // (the past belongs to another timeline now)
     // The state says whether its run counted for achievements.
     AchievementTracker& t = game->achievements();
@@ -502,6 +511,9 @@ void App::applyConfig() {
     game->playerPalette = cfg.playerPalette;
     game->luigiPalette = cfg.luigiPalette;
   }
+  // (online: the session's settings over this player's, until it ends; the
+  // host's own changes go out at the next sync point)
+  if (net.connected() && netHaveSet) netApplySettings(netSet);
 }
 
 // Decide the widescreen margin and the destination rectangle.
@@ -529,7 +541,10 @@ void App::computeLayout(IRect* dest, int* extOut, int* srcW) {
 #endif
   if (W < 16 || H < 16) wantExt = lastWantExt;
   lastWantExt = wantExt;
-  game->setWidescreen(wantExt);
+  netWantExt = wantExt;
+  // (online: the session's margin, the host's display's at the last sync
+  // point; the console's view decides which enemies are active)
+  game->setWidescreen(net.connected() && netHaveSet ? netSet.ext : wantExt);
   int extL = game->activeExtL(), extR = game->activeExtR();
   *extOut = extL;
   int sw = 256 + extL + extR;
@@ -676,8 +691,10 @@ void App::readPlayer(int p, uint16_t* out, double dt) {
     act[kActRewind] |= touch.held(TouchControls::BtnRewind);
     act[kActFastForward] |= touch.held(TouchControls::BtnFF);
 #endif
-    rewindHeld = cfg.rewind && !achLocked() && act[kActRewind] && !menu.open() && inGame;
-    fastForward = cfg.fastForward && !achLocked() && act[kActFastForward] && !menu.open() && !rewindHeld && inGame;
+    // (online: neither; the other player's game runs with this one)
+    rewindHeld = cfg.rewind && !achLocked() && act[kActRewind] && !menu.open() && inGame && !net.active();
+    fastForward = cfg.fastForward && !achLocked() && act[kActFastForward] && !menu.open() && !rewindHeld && inGame &&
+                  !net.active();
     // (pressed while achievements keep them off: say so, or they just seemed broken)
     if (achLocked() && !menu.open() && inGame && (edge(kActRewind) || edge(kActFastForward)))
       menu.notify("Fast forward and rewind are off while achievements are on (Options > Achievements)", 3.5f);
@@ -863,6 +880,10 @@ std::shared_ptr<MenuPage> App::pageMain() {
       return std::to_string(got) + " / " + std::to_string((int)achievementDefs().size());
     };
     pg.items.push_back(ac);
+    MenuItem online = MenuItem::submenu("Online Play", [this]() { menu.push(pageOnline()); },
+                                        "Play co-op over the internet: host a game, or join one as player 2.");
+    online.valueText = [this]() { return net.active() ? netSummary() : std::string(); };
+    pg.items.push_back(online);
     pg.items.push_back(MenuItem::submenu("Sound Select", [this]() { menu.push(pageSoundSelect()); },
                                          "Classic sound test: play any music number and sound effect."));
     pg.items.push_back(MenuItem::submenu("Music Player", [this]() { menu.push(pageMusicPlayer()); },
@@ -1028,6 +1049,10 @@ std::shared_ptr<MenuPage> App::pageOptions() {
         "Mario and Luigi play at once, Luigi on controller 2, in Super Mario Bros., The Lost Levels and Super "
         "Mario Bros. 3 (the screen follows both; a player left idle a few seconds is brought along). "
         "Each of those games' title screens also has CO-OP GAME, which sets this."));
+    MenuItem online = MenuItem::submenu("Online Play", [this]() { menu.push(pageOnline()); },
+                                        "Play over the internet: host a game, or join one as player 2.");
+    online.valueText = [this]() { return net.active() ? netSummary() : std::string(); };
+    pg.items.push_back(online);
     pg.items.push_back(MenuItem::header("Speed"));
     MenuItem ff = MenuItem::toggle("Fast Forward", [this]() { return cfg.fastForward && !achLocked() ? 1 : 0; },
                                    [this](int v) { cfg.fastForward = v != 0; },
@@ -1771,6 +1796,7 @@ std::shared_ptr<MenuPage> App::pageLevelSelect() {
           menu.confirm("Start " + name + (smb2 ? std::string(" as ") + kChars[*selChar] : std::string()) +
                            (co == 1 ? std::string(" in co-op") : std::string()) + "?",
                        [this, gi, w, l, ch, co]() {
+            if (netBlocked("use the level select")) return;
             const auto& defs2 = SmasGame::levelSelectList();
             std::string err;
             if (co >= 0 && cfg.coop != (co == 1)) {  // (the choice sets the setting, as a title screen's does)
@@ -1803,8 +1829,11 @@ std::shared_ptr<MenuPage> App::pageMusicPlayer() { return music.playerPage(this-
 void App::frame(double dt, int gameFrames) {
   dt = std::min(dt, 0.1);
   menu.tickToasts((float)dt);
+  typedNow.swap(textTyped);
+  textTyped.clear();
   updateInput(dt);
   updateTick();
+  netPass(dt);  // (online play: packets, and the host's game arriving)
   if (bindAction >= 0) updateBind(dt);
   if (inLauncher) {
     frameLauncher(dt, gameFrames);
@@ -1829,7 +1858,9 @@ void App::frame(double dt, int gameFrames) {
   bool emulate = !menu.open();
   if (rewinding && (!rewindHeld || !emulate)) endRewind();
   if ((!cfg.rewind || achLocked()) && rewind.snapshots()) rewind.clear();
-  if (emulate && rewindHeld && stepRewind(gameFrames)) {
+  if (net.connected() && snes && netGameFrames(dt, gameFrames, emulate)) {
+    // (online: both machines' frames in lockstep, see app_net.cpp)
+  } else if (emulate && rewindHeld && stepRewind(gameFrames)) {
     // (showing the past)
   } else if (emulate) {
     // Level select: the game is run to the chosen level out of sight (black,
@@ -1901,7 +1932,7 @@ void App::render() {
     if (menu.open()) menu.draw(video.width(), video.height(), menuAnim);
     char fpsText[32] = "";
     if (cfg.showFps) snprintf(fpsText, sizeof fpsText, "%.1f FPS", fps);
-    menu.drawOsd(video.width(), video.height(), fpsText);
+    menu.drawOsd(video.width(), video.height(), fpsText, netStatus());
     // (black frame insertion: drawn, then covered, so the timers run on)
     if (blackFrame && uiCtx) uiCtx->fillRect(all, colorF(0, 0, 0, 1));
     video.endUi();
@@ -1977,10 +2008,14 @@ void App::render() {
   touch.draw(video.canvas(), cfg.touchOpacity / 100.0f);
 #endif
   if (menu.open()) menu.draw(video.width(), video.height(), menuAnim);
-  char fpsText[32] = "";
-  if (cfg.showFps) snprintf(fpsText, sizeof fpsText, "%.1f FPS", fps);
+  char fpsText[48] = "";
+  if (cfg.showFps && net.connected() && net.rttMs() >= 0)
+    snprintf(fpsText, sizeof fpsText, "%.1f FPS  %d ms", fps, net.rttMs());
+  else if (cfg.showFps)
+    snprintf(fpsText, sizeof fpsText, "%.1f FPS", fps);
+  const std::string netLine = netStatus();
   menu.drawOsd(video.width(), video.height(), fpsText,
-               rewinding ? "<< Rewind" : fastForward ? ">> Fast Forward" : loading ? "Loading..." : "");
+               rewinding ? "<< Rewind" : fastForward ? ">> Fast Forward" : loading ? "Loading..." : netLine);
   if (blackFrame && uiCtx) uiCtx->fillRect(all, colorF(0, 0, 0, 1));
   video.endUi();
 }

@@ -16,6 +16,7 @@
 #include "app/launcher.h"
 #include "app/menu.h"
 #include "app/music.h"
+#include "app/netplay.h"
 #include "core/rewind.h"
 #include "core/snes.h"
 #include "game/smas.h"
@@ -265,6 +266,37 @@ struct App {
   MenuItem achievementsSwitch();     // Options, and the top of the Achievements page
   void achWelcome();                 // once, on the first start
   bool achLocked() const { return cfg.achievements; }  // cheats, level select, fast forward, rewind off
+  // Online play (see netplay.h; the app's side in app_net.cpp)
+  Netplay net;
+  NetSettings netSet;           // the session's settings (the last sync point's)
+  bool netHaveSet = false;
+  bool netDirty = false;        // host: the console changed outside lockstep: a sync point when play resumes
+  int netWantExt = 0;           // the widescreen margin this display wants (the host's goes out at a sync point)
+  bool netSramForeign = false;  // player 2: the console's battery save is the host's (never written here)
+  double netStall = 0;          // seconds this side has waited on the other's controller
+  double netExtWait = 0;        // host: seconds the display has wanted another widescreen margin
+  Netplay::Phase netLastPhase = Netplay::Phase::Off;
+  int netArgHost = -1;          // --host [port] (0: the configured port); -1 not given
+  std::string netArgJoin;       // --join address
+  bool netArgsDone = false;
+  std::string textTyped;        // text typed since the last pass (the platform's text events)
+  std::string typedNow;         // ... this pass's, for the text entry page
+  void netPass(double dt);
+  bool netGameFrames(double dt, int gameFrames, bool emulate);
+  void netHostSync();
+  void netApplySync(NetSync& s);
+  void netEnded(const std::string& why);
+  NetSettings netCurrentSettings() const;
+  void netApplySettings(const NetSettings& s);
+  bool netBlocked(const char* what);  // player 2: what only the host does (told so); false: go ahead
+  Netplay::Identity netIdentity() const;
+  void netHost(int port);
+  void netJoin(const std::string& address);
+  std::string netStatus() const;   // the on-screen line (empty: nothing to say)
+  std::string netSummary() const;  // the Online Play page's status row
+  std::shared_ptr<MenuPage> pageOnline();
+  std::shared_ptr<MenuPage> pageTextEntry(const std::string& title, const std::string& hint, const std::string& initial,
+                                          bool digitsOnly, std::function<void(const std::string&)> done);
   // rebinding
   int bindPlayer = 0, bindAction = -1;
   bool bindPad = false;
@@ -283,5 +315,7 @@ bool writeAll(const std::wstring& path, const void* d, size_t n);
 // Whether the data is the Super Mario All-Stars ROM (headered or not); `exact`:
 // the USA dump the port is tuned for.
 bool isSmasRom(const std::vector<uint8_t>& d, bool* exact);
+// The system clipboard's text (UTF-8; empty if none). By the platform's file.
+std::string platformClipboardText();
 // The pacing modes (see App::run).
 enum { kPaceVsync = 0, kPaceTimer = 1 };

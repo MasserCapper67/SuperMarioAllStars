@@ -682,6 +682,9 @@ LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_KEYUP:
       if (a) a->input.onKey((int)wp, false);
       return 0;
+    case WM_CHAR:  // (typed text, for the address editor: see pageTextEntry)
+      if (a && wp >= 32 && wp < 127) a->textTyped.push_back((char)wp);
+      return 0;
     case WM_DEVICECHANGE:
       if (a) a->input.rescanDevices();
       break;
@@ -839,6 +842,19 @@ void App::runTest() {
   if (video.capture(px, &w, &h)) writePng(narrow(test.shot), px.data(), w, h, w);
 }
 
+std::string platformClipboardText() {
+  std::string out;
+  if (!OpenClipboard(g_app ? g_app->hwnd : nullptr)) return out;
+  if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
+    if (const wchar_t* w = (const wchar_t*)GlobalLock(h)) {
+      out = narrow(std::wstring(w));
+      GlobalUnlock(h);
+    }
+  }
+  CloseClipboard();
+  return out;
+}
+
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);  // UI thread (file dialog, D2D, XAudio2)
@@ -857,6 +873,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     else if (a == L"--test-menu") app.test.menuPage = next();
     else if (a == L"--test-config") app.test.config = next();
     else if (a == L"--game") app.startGame = next();
+    else if (a == L"--host") {  // --host [port]: straight into online play
+      app.netArgHost = 0;
+      if (i + 1 < argc && argv[i + 1][0] >= L'0' && argv[i + 1][0] <= L'9') app.netArgHost = _wtoi(argv[++i]);
+    } else if (a == L"--join") app.netArgJoin = narrow(next());
     else if (a == L"--test-run") app.test.runSeconds = _wtof(next().c_str());
     else if (a == L"--test-device-lost") app.test.loseDeviceAt = _wtof(next().c_str());
     else if (a == L"--test-display") app.test.displayMode = std::clamp(_wtoi(next().c_str()), 0, 2);

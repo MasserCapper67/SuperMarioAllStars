@@ -119,6 +119,10 @@ struct Config {
   int padIndex[2] = {0, 1};    // which physical pad drives player 1/2
   Binding keys[2][kActCount];
   Binding pad[2][kActCount];
+  // Online play
+  int netPort = 7845;          // the UDP port to host on
+  std::string netAddress;      // the host joined last
+  int netDelay = 0;            // input delay in frames (0: from the ping)
   // Cheats (bit flags per cheat id)
   uint64_t cheats = 0;
 

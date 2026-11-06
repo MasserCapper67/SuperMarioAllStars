@@ -355,6 +355,7 @@ void App::run() {
           if (e.type == SDL_KEYDOWN) touchActive = false;
           break;
         }
+        case SDL_TEXTINPUT: textTyped += e.text.text; break;  // (the address editor: see pageTextEntry)
         case SDL_DROPFILE:
           if (e.drop.file) {
             if (takeRom(exeDir, e.drop.file)) {
@@ -443,12 +444,30 @@ void App::run() {
   }
 }
 
+std::string platformClipboardText() {
+  char* t = SDL_GetClipboardText();
+  std::string s = t ? t : "";
+  SDL_free(t);
+  return s;
+}
+
 int main(int argc, char** argv) {
   SDL_SetMainReady();
   std::unique_ptr<App> app = std::make_unique<App>();
   g_app = app.get();
-  // (a ROM given on the command line, or dropped on the AppImage: kept for next time)
-  if (argc > 1) takeRom(widenUtf8(dataDir()), argv[1]);
+  // --host [port] / --join address: straight into online play. Anything else:
+  // a ROM given on the command line, or dropped on the AppImage (kept for next time).
+  for (int i = 1; i < argc; i++) {
+    const std::string a = argv[i];
+    if (a == "--host") {
+      app->netArgHost = 0;
+      if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') app->netArgHost = atoi(argv[++i]);
+    } else if (a == "--join" && i + 1 < argc) {
+      app->netArgJoin = argv[++i];
+    } else {
+      takeRom(widenUtf8(dataDir()), argv[i]);
+    }
+  }
   int rc = 0;
   if (!app->init()) rc = 1;
   else app->run();
